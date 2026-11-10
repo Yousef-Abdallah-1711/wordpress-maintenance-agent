@@ -1,0 +1,37 @@
+sites:
+  - id: example-production
+    name: Example Production
+    url: https://example.com
+    environment: production
+    access_mode: public
+    enabled: true
+  - id: company-staging
+    name: Company Staging
+    url: https://staging.example.com
+    environment: staging
+    access_mode: authenticated
+    credentials_ref: WORDPRESS_STAGING
+    enabled: true
+schedule:
+  timezone: Africa/Cairo
+  day: sunday
+  time: "03:00"
+audit:
+  wordpress_core: true
+  plugins: true
+  php: true
+  sitemaps: true
+  pages: true
+  security_advisories: true
+  max_pages: 500
+  max_sitemap_bytes: 5000000
+  max_sitemap_depth: 8
+  timeout_seconds: 15
+  retries: 2
+reports:
+  format: [markdown, json]
+  directory: ./reports
+  retention_days: 365
+safety:
+  read_only: true
+  automatic_updates: false
