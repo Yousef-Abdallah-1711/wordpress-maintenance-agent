@@ -165,6 +165,12 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
                 result.plugins = await audit_discovered_plugins(discovered, client)
                 result.coverage.append("public_plugin_asset_hints")
                 for plugin in result.plugins:
+                    if plugin.get("status") == "OUTDATED":
+                        result.findings.append(Finding(id=f"PLUGIN-UPDATE-{plugin.get('slug', 'unknown')}", severity="medium",
+                            component="plugin", title=f"Plugin update available: {plugin.get('name') or plugin.get('slug')}",
+                            detail=f"Public page asset indicates {plugin.get('installed_version')}; WordPress.org currently lists {plugin.get('latest_version')}.",
+                            evidence=[str(plugin.get("source")), "Exact plugin slug observed in a public plugin asset URL"],
+                            recommendation="Verify the installed version in the authenticated inventory, review plugin release notes, and test an update in staging."))
                     if plugin.get("abandoned_candidate"):
                         result.findings.append(Finding(id=f"PLUGIN-ABANDONED-{plugin.get('slug')}", severity="medium", component="plugin support",
                             title=f"Potentially abandoned plugin: {plugin.get('name') or plugin.get('slug')}",

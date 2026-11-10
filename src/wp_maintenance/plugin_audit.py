@@ -10,11 +10,13 @@ from .http import SafeHttp
 from packaging.version import InvalidVersion, Version
 
 
-async def lookup_plugin(slug: str, installed_version: str, client: SafeHttp) -> dict[str, object]:
+async def lookup_plugin(slug: str, installed_version: str, client: SafeHttp, *, version_verified: bool = False) -> dict[str, object]:
     source = "https://api.wordpress.org/plugins/info/1.2/?" + urlencode({"action": "plugin_information", "request[slug]": slug})
     response = await client.get(source)
-    base: dict[str, object] = {"slug": slug, "installed_version": installed_version, "latest_version": None,
-                               "source_type": "wordpress.org", "source": source, "status": "UNKNOWN"}
+    base: dict[str, object] = {"slug": slug, "installed_version": installed_version if version_verified else None,
+                               "asset_version_hint": None if version_verified else installed_version,
+                               "installed_version_confidence": "verified" if version_verified else "unknown",
+                               "latest_version": None, "source_type": "wordpress.org", "source": source, "status": "UNKNOWN"}
     if response.status_code != 200:
         base["metadata_error"] = response.error or f"HTTP {response.status_code}"
         return base
@@ -29,11 +31,12 @@ async def lookup_plugin(slug: str, installed_version: str, client: SafeHttp) -> 
         return base
     latest = str(data["version"])
     status = "UNKNOWN"
-    try:
-        installed_v, latest_v = Version(installed_version), Version(latest)
-        status = "OUTDATED" if installed_v < latest_v else "CURRENT"
-    except InvalidVersion:
-        pass
+    if version_verified:
+        try:
+            installed_v, latest_v = Version(installed_version), Version(latest)
+            status = "OUTDATED" if installed_v < latest_v else "CURRENT"
+        except InvalidVersion:
+            pass
     last_updated = data.get("last_updated")
     abandoned = False
     if isinstance(last_updated, str):
@@ -55,5 +58,5 @@ async def audit_discovered_plugins(discovered: dict[str, str], client: SafeHttp)
     """Only query slugs discovered in exact plugin asset URLs, with inventory limits explicit."""
     output = []
     for slug, version in sorted(discovered.items()):
-        output.append(await lookup_plugin(slug, version, client))
+        output.append(await lookup_plugin(slug, version, client, version_verified=False))
     return output

@@ -46,7 +46,11 @@ def _md(result: AuditResult, delta: dict[str, list[str]]) -> str:
             priority = "P1" if status == "VULNERABLE" else "P2" if status == "OUTDATED" else "P3"
             action = "Review update" if status == "OUTDATED" else "Verify source/inventory" if status == "UNKNOWN" else "No action"
             name = plugin.get("name") or plugin.get("slug") or "Unidentified plugin"
-            lines.append(f"| {name} | {plugin.get('installed_version') or plugin.get('version') or 'UNKNOWN'} | {plugin.get('latest_version') or plugin.get('update_version') or 'UNKNOWN'} | {status} | {priority} | {action} |")
+            installed = plugin.get("installed_version") or plugin.get("version") or "UNKNOWN"
+            if plugin.get("asset_version_hint"):
+                installed = f"UNKNOWN (asset hint: {plugin['asset_version_hint']})"
+            safe_name = str(name).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+            lines.append(f"| {safe_name} | {installed} | {plugin.get('latest_version') or plugin.get('update_version') or 'UNKNOWN'} | {status} | {priority} | {action} |")
     else:
         lines.append("| Inventory unavailable | UNKNOWN | UNKNOWN | NOT_VERIFIABLE_WITH_PUBLIC_ACCESS | — | Enable authenticated access for a complete inventory |")
     lines.extend(["", "## 6. Security Findings", ""])

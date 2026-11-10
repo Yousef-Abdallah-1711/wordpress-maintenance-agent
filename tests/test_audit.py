@@ -55,7 +55,7 @@ async def test_insecure_core_status_is_reported_even_without_an_offer():
 async def test_plugin_exact_slug_lookup():
     respx.get("https://api.wordpress.org/plugins/info/1.2/").mock(return_value=httpx.Response(200, json={"name": "Example", "version": "2.0", "tested": "6.8", "requires_php": "8.1"}))
     async with SafeHttp(delay=0, retries=0, allowed_hosts={"api.wordpress.org"}) as client:
-        result = await lookup_plugin("example-plugin", "1.0", client)
+        result = await lookup_plugin("example-plugin", "1.0", client, version_verified=True)
     assert result["status"] == "OUTDATED"
     assert result["slug"] == "example-plugin"
 
@@ -68,6 +68,7 @@ async def test_plugin_unknown_installed_version_is_not_labeled_outdated():
         result = await lookup_plugin("example-plugin", "UNKNOWN", client)
     assert result["status"] == "UNKNOWN"
     assert result["latest_version"] == "2.0"
+    assert result["asset_version_hint"] == "UNKNOWN"
 
 
 def test_unknown_core_version_never_becomes_outdated():
@@ -121,7 +122,10 @@ async def test_public_site_audit_generates_evidence_based_action_required(monkey
         "audit": {"per_host_delay_seconds": 0, "retries": 0}, "reports": {"directory": str(tmp_path)}})
     result = await audit_site(config.sites[0], config)
     assert result.wordpress["installed_version"] == "6.8.1"
-    assert result.plugins[0]["status"] == "OUTDATED"
+    assert result.plugins[0]["status"] == "UNKNOWN"
+    assert result.plugins[0]["installed_version"] is None
+    assert result.plugins[0]["asset_version_hint"] == "1.0.0"
+    assert not any(f.component == "plugin" and "Sample Plugin" in f.title for f in result.findings)
     assert any(f.id == "WP-CORE-UPDATE" for f in result.findings)
     assert any(f.component == "page" for f in result.findings)
     assert result.status == "ACTION_REQUIRED"
