@@ -85,6 +85,11 @@ def _parser() -> argparse.ArgumentParser:
     batch.add_argument("--notify", choices=["github-issues"], default=None)
     batch.add_argument("--allow-public-issues", action="store_true")
     batch.add_argument("--dry-run", action="store_true", help="Resolve and validate targets, then exit")
+    hist = subs.add_parser("history", help="List or show stored audit snapshots (a local clone of the history repository)")
+    hist.add_argument("action", choices=["list", "show"])
+    hist.add_argument("--history-dir", required=True, help="history directory, e.g. history-repo/history")
+    hist.add_argument("--site", default=None)
+    hist.add_argument("--run-id", default=None, help="for `show`: a run id (default: latest)")
     report = subs.add_parser("report", help="Display the latest report")
     report.add_argument("--latest", action="store_true")
     report.add_argument("--site")
@@ -405,6 +410,34 @@ def _cmd_batch(args: argparse.Namespace) -> int:
     return code
 
 
+def _cmd_history(args: argparse.Namespace) -> int:
+    from .history_store import list_snapshots
+    from .models import AuditResult
+    from .reporting import _md
+    base = Path(args.history_dir)
+    if not base.is_dir():
+        print(f"History directory not found: {base}", file=sys.stderr)
+        return EXIT_CONFIGURATION
+    sites = [args.site] if args.site else sorted(p.name for p in base.iterdir() if p.is_dir())
+    if args.action == "list":
+        for site in sites:
+            for snap in list_snapshots(base, site):
+                print(f"{site}\t{snap.saved_at.isoformat()}\trun {snap.run_id}\t{snap.result.get('status')}\t{snap.path.name}")
+        return EXIT_OK
+    if not args.site:
+        print("history show requires --site", file=sys.stderr)
+        return EXIT_CONFIGURATION
+    snaps = list_snapshots(base, args.site)
+    if args.run_id:
+        snaps = [x for x in snaps if x.run_id == args.run_id]
+    if not snaps:
+        print("No matching snapshot found.", file=sys.stderr)
+        return EXIT_CONFIGURATION
+    snap = snaps[-1]
+    print(_md(AuditResult.model_validate(snap.result), {"available": False, "reason": f"stored snapshot from run {snap.run_id}"}))
+    return EXIT_OK
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     try:
         if getattr(args, "output", None):
@@ -496,6 +529,8 @@ def main() -> None:
             code = _cmd_site(args)
         elif args.command == "audit":
             code = _cmd_audit(args)
+        elif args.command == "history":
+            code = _cmd_history(args)
         elif args.command == "audit-batch":
             code = _cmd_batch(args)
         elif args.command == "report":

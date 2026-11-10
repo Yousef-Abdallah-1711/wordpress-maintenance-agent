@@ -149,3 +149,73 @@ def test_example_inventory_is_valid_and_contains_no_placeholder_targets():
     inv = load_inventory(ROOT / "config/websites.yaml")
     assert [s.id for s in inv.sites if s.enabled] == ["juhayna"]
     assert not any("example" in s.url for s in inv.sites)
+
+
+# ---------- private history save script against a real (local) git remote ----------
+
+def _git(cwd, *args):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+
+
+@pytest.mark.skipif(not _bash_works() or shutil.which("git") is None, reason="bash/git not available")
+def test_history_save_script_is_append_only_conflict_safe_and_prunes(tmp_path):
+    import os
+    remote = tmp_path / "remote.git"
+    _git(tmp_path, "init", "--bare", "-b", "main", str(remote))
+    seed = tmp_path / "seed"
+    _git(tmp_path, "clone", str(remote), str(seed))
+    (seed / "README.md").write_text("history\n", encoding="utf-8")
+    old_dir = seed / "archive" / "2000-01-01" / "1"
+    old_dir.mkdir(parents=True)
+    (old_dir / "summary.md").write_text("ancient\n", encoding="utf-8")
+    for cmd in (["config", "user.email", "t@example.com"], ["config", "user.name", "t"], ["add", "-A"], ["commit", "-m", "seed"], ["push", "origin", "HEAD:main"]):
+        _git(seed, *cmd)
+
+    work = tmp_path / "work"
+    work.mkdir()
+    _git(work, "clone", str(remote), "history-repo")
+    reports = work / "reports" / "2026-11-15"
+    (reports / "sites" / "juhayna").mkdir(parents=True)
+    (reports / "summary.md").write_text("week one\n", encoding="utf-8")
+    snap_dir = work / "history-repo" / "history" / "juhayna"
+    snap_dir.mkdir(parents=True)
+    (snap_dir / "20261115T010000Z-100.json").write_text("{}", encoding="utf-8")
+
+    # A concurrent writer pushes first: the script must rebase instead of failing or overwriting.
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", str(remote), str(other))
+    (other / "note.txt").write_text("concurrent\n", encoding="utf-8")
+    for cmd in (["config", "user.email", "t@example.com"], ["config", "user.name", "t"], ["add", "-A"], ["commit", "-m", "concurrent"], ["push", "origin", "HEAD:main"]):
+        _git(other, *cmd)
+
+    env = {**os.environ, "HISTORY_KEY": "not-a-real-key", "REPORT_DIR": "reports/2026-11-15", "RETENTION_DAYS": "365",
+           "RUNNER_TEMP": str(tmp_path), "GITHUB_RUN_ID": "100", "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md")}
+    script = str(ROOT / "scripts/ci/history-repo-save.sh").replace("\\", "/")
+    result = subprocess.run([shutil.which("bash"), script], cwd=work, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "verified on the remote" in result.stdout
+    assert not (tmp_path / "wpm_history_key").exists()  # deploy key file removed
+
+    check = tmp_path / "check"
+    _git(tmp_path, "clone", str(remote), str(check))
+    assert (check / "note.txt").exists()  # concurrent change preserved
+    assert (check / "history/juhayna/20261115T010000Z-100.json").exists()
+    assert (check / "archive/2026-11-15/100/summary.md").read_text(encoding="utf-8") == "week one\n"
+    assert not (check / "archive/2000-01-01").exists()  # retention pruned the ancient archive
+
+    # A second run appends a new archive folder and never rewrites the first one.
+    (reports / "summary.md").write_text("week two\n", encoding="utf-8")
+    (snap_dir / "20261122T010000Z-101.json").write_text("{}", encoding="utf-8")
+    env["GITHUB_RUN_ID"] = "101"
+    assert subprocess.run([shutil.which("bash"), script], cwd=work, env=env, capture_output=True, text=True).returncode == 0
+    _git(check, "pull", "-q")
+    assert (check / "archive/2026-11-15/100/summary.md").read_text(encoding="utf-8") == "week one\n"
+    assert (check / "archive/2026-11-15/101/summary.md").read_text(encoding="utf-8") == "week two\n"
+
+
+def test_setup_scripts_refuse_non_private_history_and_never_print_keys():
+    for name in ("setup-private-history.sh", "setup-private-history.ps1"):
+        text = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+        assert "NOT private" in text and "--allow-write" in text and "WP_MAINTENANCE_HISTORY_DEPLOY_KEY" in text
+        assert "cat \"${tmp}/key\"" not in text and "Write-Host $key" not in text
+    assert "eval " not in (ROOT / "scripts/setup-private-history.sh").read_text(encoding="utf-8")

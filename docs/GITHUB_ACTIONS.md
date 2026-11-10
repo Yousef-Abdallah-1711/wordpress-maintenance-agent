@@ -80,20 +80,37 @@ Runners are ephemeral, so history is stored outside them. The workflow chooses a
 
 | Backend | When | Notes |
 |---|---|---|
-| **Private history repository** (recommended) | `WP_MAINTENANCE_HISTORY_REPO` variable (`owner/name`) + `WP_MAINTENANCE_HISTORY_DEPLOY_KEY` secret | Per-site snapshots `history/<site>/<UTC time>-<run id>.json` plus a report archive; never overwritten; pruned by `WP_MAINTENANCE_RETENTION_DAYS` (default 365). Works even when this repository is public. |
+| **Private history repository** (recommended) | `WP_MAINTENANCE_HISTORY_REPO` variable (`owner/name`) + `WP_MAINTENANCE_HISTORY_DEPLOY_KEY` secret (set by the setup script below) | Per-site snapshots plus a report archive; append-only; pruned by `WP_MAINTENANCE_RETENTION_DAYS`. Works when this repository is public and is the only backend that keeps reports private there. |
 | **Artifact** | repository is private, or `WP_MAINTENANCE_PUBLIC_ARTIFACTS=true` | Each run restores the newest `wp-maintenance-history` artifact and uploads an updated one (retention `WP_MAINTENANCE_HISTORY_RETENTION_DAYS`, default 90, GitHub max). A gap longer than the retention loses the baseline. |
 | **None** | public repository without the above | The audit still runs; reports are **not** uploaded; the summary states that comparison is unavailable. |
 
-Create the private history repository once:
+### Private history setup (one time, run by a repository admin)
+
+Granting credentials is deliberately a human step. From a machine where `gh` is logged in as an admin of the source repository:
+
 ```sh
-gh repo create OWNER/wordpress-maintenance-history --private --add-readme
-ssh-keygen -t ed25519 -N "" -f history_key
-gh repo deploy-key add history_key.pub --repo OWNER/wordpress-maintenance-history --allow-write --title "wp-maintenance"
-gh secret set WP_MAINTENANCE_HISTORY_DEPLOY_KEY --repo OWNER/wordpress-maintenance-agent < history_key
-gh variable set WP_MAINTENANCE_HISTORY_REPO --repo OWNER/wordpress-maintenance-agent --body OWNER/wordpress-maintenance-history
-rm history_key history_key.pub
+bash scripts/setup-private-history.sh OWNER          # Linux/macOS/Git Bash
+powershell -File scripts\setup-private-history.ps1 -Owner OWNER   # Windows
 ```
-The deploy key can only touch that one repository. Do not use a personal access token.
+
+The script (1) creates the **private** `OWNER/wordpress-maintenance-history` repository if missing and refuses to continue if it is not private, (2) generates a throw-away ed25519 key, (3) registers only the public half as a *write deploy key on that single repository*, (4) stores the private half as the Actions secret `WP_MAINTENANCE_HISTORY_DEPLOY_KEY` and sets the variable `WP_MAINTENANCE_HISTORY_REPO`, (5) deletes the local key files. Re-running rotates the key. A deploy key can touch only that one repository; no personal access token is stored. (A fine-grained token or GitHub App installation token limited to the history repository with `Contents: read & write` is an acceptable alternative if your organisation forbids deploy keys.)
+
+### Storage guarantees
+
+- Every run appends `history/<site>/<UTC time>-<run id>.json` and `archive/<report date>/<run id>/...` (all reports, summary and weekly delta) in one commit; existing files are never rewritten. A concurrent writer is handled by `pull --rebase` and retry, and the push is verified against the remote head.
+- Retention: archive folders and snapshots older than `WP_MAINTENANCE_RETENTION_DAYS` (default 365) are pruned; the newest two snapshots per site are always kept.
+- The public source repository never receives reports, and report artifacts are not uploaded from public repositories (see below).
+
+### Retrieving reports (authenticated)
+
+```sh
+gh repo clone OWNER/wordpress-maintenance-history && cd wordpress-maintenance-history
+ls archive/                                   # YYYY-MM-DD folders, one subfolder per workflow run id
+cat archive/2026-11-15/<run id>/summary.md    # weekly summary; also weekly-delta.md and sites/<id>/report.md|json
+wp-maintenance history list --history-dir history
+wp-maintenance history show --history-dir history --site juhayna   # re-render the latest stored report
+```
+Only people with access to the private repository can read these files. You can also browse them in the GitHub web UI.
 
 **Comparison rules.** The previous *valid* snapshot (complete evidence, not `INCOMPLETE`) is loaded per site. Findings are matched by stable ids. A finding is reported **resolved** only if the relevant check ran again and was clean (a page is re-fetched; a coverage tag is present; a version is visible). Otherwise it is listed under *unverified changes* (page not checked, partial coverage, version no longer disclosed, incomplete audit). `weekly-delta.md` lists new, resolved, persistent and unverified findings plus detected changes (new/resolved 404 and 5xx, redirect problems, certificate renewal/issuer change, WordPress/PHP/plugin version changes where both runs had evidence, new/removed sitemap URLs when coverage was complete, coverage changes).
 

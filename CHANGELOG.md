@@ -7,6 +7,7 @@
 - `audit-batch`: bounded multi-site execution with per-site isolation, timeouts, cancellation; `summary.md|json`, `weekly-delta.md`, per-site reports.
 - Persistent history (private history repository via deploy key, or artifact backend), retention, evidence-aware week-over-week comparison (resolved only when re-verified).
 - Optional GitHub Issues notifier for critical findings and an extensible notifier interface; robots.txt-respecting crawl (`respect_robots_txt`).
+- `scripts/setup-private-history.sh|ps1` (private history repository + single-repo deploy key), `wp-maintenance history list|show`, verified conflict-safe append-only history save, step-summary confirmation of the saved snapshot.
 - Replaces the 0.2 workflow and its `WP_MAINTENANCE_CONFIG_B64` secret flow.
 
 ## 0.2.0 — 2026-11-10

@@ -358,3 +358,17 @@ def test_all_notifier_calls_use_argument_lists_without_a_shell():
     gh = FakeGh()
     GitHubIssueNotifier("o/r", runner=gh).notify(*_notif_inputs())
     assert all(isinstance(c, list) and all(isinstance(a, str) for a in c) for c in gh.calls)
+
+
+def test_history_cli_lists_and_shows_stored_snapshots(tmp_path, capsys):
+    from types import SimpleNamespace
+    from wp_maintenance import cli
+    save_snapshot(tmp_path, dump(R(findings=[F("PAGE-a", url="u")])), run_id="11", now=NOW)
+    save_snapshot(tmp_path, dump(R(status="PASS")), run_id="12", now=NOW + timedelta(days=7))
+    assert cli._cmd_history(SimpleNamespace(action="list", history_dir=str(tmp_path), site=None, run_id=None)) == 0
+    out = capsys.readouterr().out
+    assert "run 11" in out and "run 12" in out
+    assert cli._cmd_history(SimpleNamespace(action="show", history_dir=str(tmp_path), site="s1", run_id="11")) == 0
+    assert "WordPress Maintenance Audit Report" in capsys.readouterr().out
+    assert cli._cmd_history(SimpleNamespace(action="show", history_dir=str(tmp_path), site="s1", run_id="nope")) == cli.EXIT_CONFIGURATION
+    assert cli._cmd_history(SimpleNamespace(action="list", history_dir=str(tmp_path / "missing"), site=None, run_id=None)) == cli.EXIT_CONFIGURATION

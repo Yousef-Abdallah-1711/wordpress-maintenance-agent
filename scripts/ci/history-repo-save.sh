@@ -44,7 +44,18 @@ fi
 git commit -m "Audit run ${GITHUB_RUN_ID}" --quiet
 for attempt in 1 2 3; do
   if git push --quiet origin HEAD; then
-    echo "History saved (commit $(git rev-parse --short HEAD))."
+    local_sha="$(git rev-parse HEAD)"
+    remote_sha="$(git ls-remote origin HEAD | cut -f1)"
+    if [ "${local_sha}" != "${remote_sha}" ]; then
+      echo "::error title=History verification failed::The pushed commit is not the remote head."
+      exit 1
+    fi
+    snapshots="$(find history -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
+    echo "History saved and verified on the remote (commit ${local_sha:0:7}, ${snapshots} snapshots)."
+    {
+      echo "### Private history"
+      echo "- Snapshot saved and verified on the history repository (commit \`${local_sha:0:7}\`, ${snapshots} snapshots total)."
+    } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
     exit 0
   fi
   git pull --rebase --quiet origin HEAD || true
