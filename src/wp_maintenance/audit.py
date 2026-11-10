@@ -20,9 +20,12 @@ from .advisories import check_wordfence_feed
 from .http import SafeHttp
 from .models import AccessMode, AppConfig, AuditResult, Finding, Site
 from .php_audit import evaluate_php
-from .plugin_audit import audit_discovered_plugins, lookup_plugin
+from .plugin_audit import audit_discovered_plugins, classify_plugin, lookup_plugin
 from .security import redact_secrets
+from .site_checks import (alt_host, analyze_performance, analyze_security_headers, analyze_seo,
+                          check_https_redirect, detect_wordpress, discover_plugin_references, php_from_headers)
 from .sitemap import discover_sitemaps
+from .ssl_audit import audit_ssl, ssl_findings
 
 
 class PublicEvidenceParser(HTMLParser):
@@ -30,9 +33,15 @@ class PublicEvidenceParser(HTMLParser):
         super().__init__()
         self.generator: str | None = None
         self.plugin_assets: dict[str, str] = {}
+        self.canonical: str | None = None
+        self.meta_robots: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         data = dict(attrs)
+        if tag.lower() == "link" and "canonical" in (data.get("rel") or "").lower().split() and data.get("href"):
+            self.canonical = self.canonical or data.get("href")
+        if tag.lower() == "meta" and (data.get("name") or "").lower() == "robots":
+            self.meta_robots = data.get("content")
         if tag.lower() == "meta" and (data.get("name") or "").lower() == "generator":
             self.generator = data.get("content")
         for key in ("src", "href"):
@@ -82,6 +91,15 @@ async def _authenticated_inventory(site: Site, client: SafeHttp) -> dict[str, ob
     return data
 
 
+async def _probe(awaitable, result: AuditResult, label: str):
+    """Run an optional public check; a failure is recorded as a limitation, never as success."""
+    try:
+        return await awaitable
+    except Exception as exc:  # noqa: BLE001 - optional probes must not abort the audit
+        result.limitations.append(f"Optional check '{label}' could not complete: {type(exc).__name__}.")
+        return None
+
+
 def _priority(severity: str) -> str:
     return {"critical": "P0", "high": "P1", "medium": "P2", "low": "P3"}.get(severity, "P2")
 
@@ -124,8 +142,93 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
         generator_html = parser.generator or ""
         result.coverage.append("homepage_http")
 
+        home_ok = home.status_code == 200 and not home.error
+        origin = result.url
+        host = (site.url.host or "").lower()
+        eff_host = (urlsplit(home.final_url).hostname or host).lower() if home.status_code else host
+        https_final = home.final_url.lower().startswith("https://")
+        result.http = {"final_url": home.final_url, "status": home.status_code,
+                       "redirect_chain": home.redirect_chain, "headers_checked_at": datetime.now(timezone.utc).isoformat()}
+        if home.error and ("loop" in home.error or "maximum redirects" in home.error):
+            result.findings.append(Finding(id="HTTP-REDIRECT-LOOP", severity="high", component="http",
+                title="Homepage redirect loop or excessive redirects", detail=home.error,
+                evidence=[f"GET {origin}/ chain: {' -> '.join(home.redirect_chain) or 'n/a'}"],
+                recommendation="Fix the redirect rules so the homepage resolves in one or two hops."))
+        elif len(home.redirect_chain) > 3:
+            result.findings.append(Finding(id="HTTP-REDIRECT-CHAIN", severity="low", component="http",
+                title="Homepage uses a long redirect chain", detail=f"{len(home.redirect_chain)} redirects before the final page.",
+                evidence=[" -> ".join(home.redirect_chain)], recommendation="Collapse redirects into a single hop to the canonical URL."))
+
+        if opts.ssl:
+            ssl_info = await _probe(audit_ssl(eff_host, warning_days=opts.ssl_warning_days,
+                high_days=opts.ssl_high_days, critical_days=opts.ssl_critical_days), result, "TLS certificate inspection")
+            if ssl_info is not None:
+                redirect = await _probe(check_https_redirect(eff_host, client), result, "HTTP to HTTPS redirect")
+                if redirect and redirect.get("state") == "NO_REDIRECT" and ssl_info.get("error_kind") == "CONNECTION_FAILED":
+                    redirect["state"] = "HTTP_ONLY"
+                result.ssl = {**ssl_info, "https_redirect": redirect}
+                result.findings.extend(ssl_findings(ssl_info, https_redirect=redirect))
+                result.coverage.append("ssl_tls_inspection")
+                if ssl_info.get("error_kind") == "DNS_OR_POLICY_ERROR":
+                    result.errors.append(f"TLS inspection: {ssl_info.get('error')}")
+
+        if home.status_code is not None:
+            _, perf_findings = analyze_performance(home.elapsed_ms)
+            result.http["homepage_response_ms"] = round(home.elapsed_ms, 1)
+            result.findings.extend(perf_findings)
+            if opts.security_headers:
+                present, header_findings = analyze_security_headers(home.headers, https=https_final)
+                result.http["security_headers"] = present
+                result.findings.extend(header_findings)
+                result.coverage.append("security_headers")
+        if opts.seo:
+            robots = await _probe(client.get(f"{origin}/robots.txt"), result, "robots.txt")
+            if home_ok:
+                seo_info, seo_findings = analyze_seo(robots=robots, canonical=parser.canonical,
+                    meta_robots=parser.meta_robots,
+                    x_robots=next((v for k, v in home.headers.items() if k.lower() == "x-robots-tag"), None),
+                    final_url=home.final_url)
+                result.http["seo"] = seo_info
+                result.findings.extend(seo_findings)
+            counterpart = alt_host(eff_host)
+            if home_ok and counterpart and counterpart in {h.lower() for h in site.approved_hosts}:
+                other = await _probe(client.get(f"https://{counterpart}/"), result, "www/apex host consistency")
+                if other is not None and other.status_code:
+                    same = (urlsplit(other.final_url).hostname or "").lower() == eff_host
+                    result.http["alternate_host"] = {"host": counterpart, "status": other.status_code,
+                        "redirects_to_canonical_host": same}
+                    if other.status_code == 200 and not same:
+                        result.findings.append(Finding(id="HTTP-DUAL-HOST", severity="low", component="http",
+                            title="Both www and non-www hosts serve content",
+                            detail=f"{counterpart} returned HTTP 200 without redirecting to {eff_host}.",
+                            evidence=[f"GET https://{counterpart}/ -> {other.status_code} ({other.final_url})"],
+                            recommendation="Redirect one host to the other to keep a single canonical host."))
+            result.coverage.append("technical_seo")
+
+        rest = feed = None
+        detection: dict[str, object] = {"state": "UNKNOWN", "signals": []}
+        if opts.wordpress_core:
+            rest = await _probe(client.get(f"{origin}/wp-json/", max_bytes=500_000), result, "WordPress REST API probe")
+            if not re.search(r"WordPress\s+[0-9]", generator_html):
+                feed = await _probe(client.get(f"{origin}/feed/", max_bytes=500_000), result, "RSS feed generator probe")
+            detection = detect_wordpress(html, parser.generator, rest, feed, homepage_ok=home_ok)
+            if detection.get("feed_version") and not generator_html:
+                generator_html = f"WordPress {detection['feed_version']}"
+            if detection["state"] in {"NOT_DETECTED", "UNKNOWN"}:
+                result.findings.append(Finding(id="WP-NOT-DETECTED", severity="informational", component="WordPress core",
+                    title="WordPress was not detected from public evidence" if detection["state"] == "NOT_DETECTED"
+                    else "WordPress detection could not be completed",
+                    detail=f"Detection state: {detection['state']}.", evidence=[f"GET {origin}/", f"GET {origin}/wp-json/"],
+                    recommendation="Confirm the site runs WordPress before relying on plugin and core findings."))
+
         if opts.wordpress_core:
             core = await audit_core(result.url, generator_html, client)
+            core["detection"] = detection["state"]
+            core["detection_signals"] = detection.get("signals", [])
+            core["version_status"] = "PUBLICLY_INDICATED_UNVERIFIED" if core.get("installed_version") else "UNKNOWN"
+            core["retrieved_at"] = datetime.now(timezone.utc).isoformat()
+            if detection.get("feed_version") and core.get("installed_version"):
+                core["evidence"] = "public RSS feed generator metadata"
             result.wordpress = core
             result.coverage.append("wordpress_core_metadata")
             if core.get("lookup_error") and core.get("installed_version"):
@@ -156,6 +259,8 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
             result.findings = [finding for finding in result.findings if finding.component != "WordPress core"]
             if opts.wordpress_core and inventory.get("wordpress_version"):
                 result.wordpress = await audit_core(result.url, f"WordPress {inventory['wordpress_version']}", client)
+                result.wordpress["version_status"] = "VERIFIED"
+                result.wordpress["retrieved_at"] = datetime.now(timezone.utc).isoformat()
                 result.coverage.append("authenticated_wordpress_core_update_check")
                 if result.wordpress.get("lookup_error"):
                     result.errors.append(f"WordPress core metadata: {result.wordpress['lookup_error']}")
@@ -210,6 +315,7 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
                         evidence=["Authenticated WordPress connector update transient" if transient_update else str(metadata.get("source"))], recommendation="Review release notes and compatibility, then update in staging."))
                 else:
                     plugin["status"] = "CURRENT" if metadata.get("status") == "CURRENT" else "UNKNOWN"
+                classify_plugin(plugin, verified=True, metadata_error_kind=metadata.get("metadata_error_kind"))
                 php_required, wp_required = _plugin_requirements(plugin, metadata)
                 php_installed = result.php.get("installed_version")
                 if php_required and php_installed:
@@ -240,11 +346,26 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
                         recommendation="Confirm vendor support and consider a maintained alternative if compatibility or security fixes are unavailable."))
         else:
             if opts.php:
-                result.php = evaluate_php(None)
+                php_version, php_evidence = php_from_headers(home.headers)
+                result.php = evaluate_php(php_version)
+                if php_version:
+                    result.php["evidence"] = php_evidence
+                    result.coverage.append("php_header_disclosure")
+                    result.findings.append(Finding(id="PHP-VERSION-DISCLOSED", severity="low", component="PHP",
+                        title="PHP version is publicly disclosed", detail=f"Response header reveals PHP {php_version}.",
+                        evidence=[str(php_evidence)], recommendation="Hide the PHP version (expose_php=Off) and keep PHP on a supported branch."))
+                else:
+                    result.php["message"] = "PHP VERSION: UNKNOWN — AUTHENTICATED VERIFICATION REQUIRED"
             if opts.plugins:
-                discovered = dict(parser.plugin_assets)
+                references = discover_plugin_references(html)
+                discovered = {slug: info["version_hint"] for slug, info in references.items()}
+                for slug, hint in parser.plugin_assets.items():
+                    discovered.setdefault(slug, hint)
                 result.plugins = await audit_discovered_plugins(discovered, client)
                 result.coverage.append("public_plugin_asset_hints")
+                for plugin in result.plugins:
+                    plugin["evidence_url"] = references.get(str(plugin.get("slug")), {}).get("evidence_url")
+                    classify_plugin(plugin, verified=False, metadata_error_kind=plugin.get("metadata_error_kind"))
                 for plugin in result.plugins:
                     if plugin.get("metadata_error"):
                         if plugin.get("metadata_error_kind") in {"transport", "rate_limit", "server", "malformed"}:
@@ -264,7 +385,8 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
                             evidence=[str(plugin.get("source")), str(plugin.get("last_updated"))],
                             recommendation="Confirm vendor support and consider a maintained alternative if compatibility or security fixes are unavailable."))
                 result.limitations.append("Public HTML plugin asset hints are incomplete and may not reveal inactive, must-use, premium, or non-enqueued plugins.")
-                result.limitations.append("PHP version and exact runtime support are NOT_VERIFIABLE_WITH_PUBLIC_ACCESS.")
+                if not result.php.get("installed_version"):
+                    result.limitations.append("PHP VERSION: UNKNOWN — AUTHENTICATED VERIFICATION REQUIRED (not disclosed publicly).")
             else:
                 result.limitations.append("Plugin inventory is NOT_VERIFIABLE_WITH_PUBLIC_ACCESS.")
 
@@ -307,9 +429,12 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
             sitemaps = await discover_sitemaps(result.url, client, configured=[str(x) for x in site.sitemap_urls],
                 approved_hosts=set(site.approved_hosts), max_pages=opts.max_pages,
                 max_depth=opts.max_sitemap_depth, max_bytes=opts.max_sitemap_bytes)
+            limit_notes = [i for i in sitemaps.invalid if "limit reached" in str(i.get("reason", ""))
+                           or "maximum sitemap count" in str(i.get("reason", ""))]
+            sitemaps.invalid = [i for i in sitemaps.invalid if i not in limit_notes]
             result.sitemaps = {"discovered": sitemaps.discovered, "checked": sitemaps.checked_sitemaps,
-                "urls_discovered": len(sitemaps.urls), "duplicates": sitemaps.duplicates,
-                "invalid": sitemaps.invalid}
+                "urls_discovered": len(sitemaps.urls), "urls_listed": sitemaps.listed_total, "truncated": sitemaps.truncated,
+                "duplicates": sitemaps.duplicates, "invalid": sitemaps.invalid}
             result.coverage.append("sitemap_discovery")
             if not sitemaps.discovered:
                 result.limitations.append("No sitemap was found at configured, advertised, or conventional WordPress locations.")
@@ -327,9 +452,20 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
                 excluded = [path for path in site.exclude_paths if path]
                 allowed_urls = [url for url in sitemaps.urls
                                 if not any(urlsplit(url).path.startswith(path) for path in excluded)]
+                crawl_stats: dict[str, object] = {}
                 page_results = await check_pages(allowed_urls, client, concurrency=opts.concurrency,
-                                                 excluded_paths=tuple(excluded))
+                                                 excluded_paths=tuple(excluded),
+                                                 deadline_seconds=opts.max_crawl_seconds, stats=crawl_stats)
                 result.pages = page_results
+                listed = max(sitemaps.listed_total, len(allowed_urls))
+                result.crawl = {"urls_checked": len(page_results), "urls_in_scope": len(allowed_urls),
+                    "sitemap_urls_listed": listed, "sitemap_truncated": sitemaps.truncated,
+                    "halted_reason": crawl_stats.get("halted_reason")}
+                suffix = "+" if sitemaps.truncated else ""
+                if len(page_results) < listed or sitemaps.truncated:
+                    result.limitations.append(f"Page coverage is partial: {len(page_results)}/{listed}{suffix} sitemap URLs checked.")
+                if crawl_stats.get("halted_reason"):
+                    result.errors.append(f"Page crawl stopped early: {crawl_stats['halted_reason']}.")
                 result.coverage.append("sitemap_page_http_checks")
                 for page in result.pages:
                     classification = page.get("classification")
@@ -347,9 +483,9 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
     result.finished_at = datetime.now(timezone.utc)
     if result.errors or not result.coverage:
         result.status = "INCOMPLETE"
-    elif result.findings:
+    elif any(f.severity in {"critical", "high", "medium"} for f in result.findings):
         result.status = "ACTION_REQUIRED"
-    elif result.limitations:
+    elif result.findings or result.limitations:
         result.status = "PASS_WITH_WARNINGS"
     else:
         result.status = "PASS"

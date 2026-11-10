@@ -63,6 +63,19 @@ class AuditOptions(BaseModel):
     timeout_seconds: float = Field(default=15, gt=0, le=120)
     retries: int = Field(default=2, ge=0, le=5)
     max_response_bytes: int = Field(default=2_000_000, ge=1024, le=20_000_000)
+    ssl: bool = True
+    security_headers: bool = True
+    seo: bool = True
+    ssl_warning_days: int = Field(default=30, ge=1, le=365)
+    ssl_high_days: int = Field(default=14, ge=1, le=365)
+    ssl_critical_days: int = Field(default=6, ge=0, le=365)
+    max_crawl_seconds: float = Field(default=900, ge=10, le=86400)
+
+    @model_validator(mode="after")
+    def ordered_ssl_thresholds(self) -> "AuditOptions":
+        if not (self.ssl_critical_days < self.ssl_high_days < self.ssl_warning_days):
+            raise ValueError("ssl thresholds must satisfy critical < high < warning")
+        return self
 
 
 class Schedule(BaseModel):
@@ -153,8 +166,11 @@ class AuditResult(BaseModel):
     wordpress: dict[str, Any] = Field(default_factory=dict)
     php: dict[str, Any] = Field(default_factory=dict)
     plugins: list[dict[str, Any]] = Field(default_factory=list)
+    ssl: dict[str, Any] = Field(default_factory=dict)
+    http: dict[str, Any] = Field(default_factory=dict)
     sitemaps: dict[str, Any] = Field(default_factory=dict)
     pages: list[dict[str, Any]] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+    crawl: dict[str, Any] = Field(default_factory=dict)

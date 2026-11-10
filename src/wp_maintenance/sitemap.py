@@ -23,6 +23,8 @@ class SitemapResult:
     duplicates: list[str] = field(default_factory=list)
     invalid: list[dict[str, str]] = field(default_factory=list)
     checked_sitemaps: list[str] = field(default_factory=list)
+    listed_total: int = 0
+    truncated: bool = False
 
 
 def parse_sitemap_xml(content: bytes, *, max_bytes: int = 5_000_000) -> tuple[str, list[str]]:
@@ -127,10 +129,15 @@ async def discover_sitemaps(site_url: str, client: SafeHttp, *, configured: list
                 elif len(result.urls) < max_pages:
                     seen_urls.add(normalized)
                     result.urls.append(normalized)
+                    result.listed_total += 1
+                else:
+                    result.listed_total += 1
+                    result.truncated = True
             except UnsafeTarget as exc:
                 result.invalid.append({"url": loc, "reason": str(exc)})
     remaining = required_queue or optional_queue
     if remaining:
+        result.truncated = True
         result.invalid.append({"url": remaining[0][0], "reason": "URL limit reached; sitemap entries left unchecked"})
     result.discovered = list(dict.fromkeys(result.discovered))
     return result

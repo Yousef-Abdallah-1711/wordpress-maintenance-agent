@@ -2,6 +2,24 @@
 
 A read-only Python CLI that collects public and explicitly authenticated WordPress maintenance evidence, checks sitemap URLs, and writes one Markdown report per site plus a machine-readable JSON summary. It does not depend on an AI model to determine versions or HTTP outcomes.
 
+## URL-only quick start (v0.2)
+
+```sh
+python -m pip install .
+wp-maintenance install --global        # optional: Codex / Claude Code integration
+wp-maintenance audit https://www.example.com
+```
+
+That is all: no YAML, WordPress login, SSH, FTP, hosting credentials or plugin. The audit checks SSL/TLS, WordPress detection and version evidence, publicly exposed plugins, PHP disclosure, sitemaps and every sitemap URL, security headers, technical SEO and response time, then writes `latest.md`, `latest.json` and a preserved `history/` entry under `~/wp-maintenance-reports/<site>/`. In Codex or Claude Code, from any directory, just say `Audit https://www.example.com`. See [docs/CLI.md](docs/CLI.md).
+
+Weekly monitoring of several sites:
+
+```sh
+wp-maintenance site add https://www.example.com
+wp-maintenance site add https://shop.example.org
+wp-maintenance schedule install --weekly --day sunday --time 03:00
+```
+
 ## What it does
 
 - Audits multiple configured WordPress sites.
@@ -10,6 +28,7 @@ A read-only Python CLI that collects public and explicitly authenticated WordPre
 - Uses the optional authenticated connector to inventory active/inactive/must-use plugins, core/PHP versions, and core/plugin update transients.
 - Discovers sitemaps through `robots.txt` and common WordPress paths, parses nested indexes safely, and checks in-scope URLs.
 - Produces dated Markdown and JSON reports with evidence, limitations, status and historical issue deltas.
+- Audits any public URL with zero configuration, including TLS certificate expiry/trust/hostname checks, security headers, technical SEO and partial-coverage reporting (`checked/listed`).
 - Supports user-level Codex and Claude Code skills, GitHub Actions, cron, systemd user timers and Windows Task Scheduler.
 
 ## What it does not do
@@ -65,11 +84,11 @@ Authenticated access uses a WordPress Application Password whose user has the co
 
 All website requests use TLS verification, timeouts, retry limits, bounded response sizes and explicit redirect checks. Crawls stay within the site's hostname unless `approved_hosts` is configured. Private, loopback, link-local and reserved IPs are rejected, and only standard web ports are allowed. The connector's inventory route requires WordPress authentication and its dedicated `view_wp_maintenance_inventory` capability; application passwords do not bypass that capability check.
 
-Results are saved under `reports/YYYY-MM-DD/` (ignored by Git) with a per-site Markdown report, `summary.md` and `results.json`. Status values are `PASS`, `PASS_WITH_WARNINGS`, `ACTION_REQUIRED` or `INCOMPLETE`. Exit codes: 0 success/warnings, 2 actionable findings, 3 config/usage failure, 4 authentication failure, 5 incomplete audit, 6 internal failure.
+Reports are written to `<reports>/<site>/latest.md|json` plus a never-overwritten `history/` (default `~/wp-maintenance-reports`; config-mode runs also keep `YYYY-MM-DD/` run folders). Status values are `PASS`, `PASS_WITH_WARNINGS`, `ACTION_REQUIRED` or `INCOMPLETE`; only medium-or-higher findings make a run `ACTION_REQUIRED`, and partial coverage can never be `PASS`. Exit codes: 0 success/warnings, 2 actionable findings, 3 config/usage failure, 4 authentication failure, 5 incomplete audit, 6 internal failure, 130 cancelled.
 
 ## Weekend automation
 
-Default preference: Sunday 03:00 in the YAML timezone. Install a scheduler with `wp-maintenance schedule install --config wp-maintenance.yaml`; check it with `wp-maintenance schedule status`. Linux cron and systemd use the configured timezone. Windows Task Scheduler requires the configured timezone rules to match the machine's local timezone. GitHub Actions uses UTC. DST changes are handled by the selected scheduler's timezone rules.
+Register URLs with `wp-maintenance site add <url>` and run `wp-maintenance schedule install --weekly --day sunday --time 03:00` (add `--timezone Africa/Cairo` for an explicit IANA zone; without it the machine's local time is used). `schedule status` / `schedule remove` manage it. It runs without Codex or Claude Code open, but only while the machine is on (Windows Task Scheduler: while the user is logged on). See [docs/AUTOMATION.md](docs/AUTOMATION.md).
 
 GitHub Actions runs weekly Sunday at 00:00 UTC and supports manual dispatch. GitHub cron uses UTC, not `schedule.timezone`. Add a `WP_MAINTENANCE_CONFIG_B64` repository secret containing base64-encoded YAML and environment secrets for credentials. Reports are uploaded as workflow artifacts, not committed. Do not put private site details in a public repository; artifacts in public repositories may be visible to repository readers.
 
@@ -83,7 +102,7 @@ Only agent-owned guidance blocks and skill directories marked by the installer a
 
 ## Security and limitations
 
-See [Security](SECURITY.md), [Installation](docs/INSTALLATION.md), [Configuration](docs/CONFIGURATION.md), [Authentication](docs/AUTHENTICATION.md), [Automation](docs/AUTOMATION.md), and [Report format](docs/REPORT_FORMAT.md). Each socket connection pins a validated public DNS address while preserving the hostname for TLS. Keep network egress controls enabled as a defense in depth.
+See [CLI reference](docs/CLI.md), [Security](SECURITY.md), [Installation](docs/INSTALLATION.md), [Configuration](docs/CONFIGURATION.md), [Authentication](docs/AUTHENTICATION.md), [Automation](docs/AUTOMATION.md), and [Report format](docs/REPORT_FORMAT.md). Each socket connection pins a validated public DNS address while preserving the hostname for TLS. Keep network egress controls enabled as a defense in depth.
 
 ## Development
 

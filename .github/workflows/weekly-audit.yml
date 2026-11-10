@@ -26,9 +26,14 @@ jobs:
         id: config
         env:
           CONFIG_B64: ${{ secrets.WP_MAINTENANCE_CONFIG_B64 }}
+          WP_MAINTENANCE_URLS: ${{ vars.WP_MAINTENANCE_URLS }}
+          WP_MAINTENANCE_REPORTS_DIR: ${{ github.workspace }}/reports
         run: |
           if [ -n "$CONFIG_B64" ]; then
             python -c 'import base64,os,pathlib; pathlib.Path("wp-maintenance.yaml").write_bytes(base64.b64decode(os.environ["CONFIG_B64"]))'
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$WP_MAINTENANCE_URLS" ]; then
+            for url in $WP_MAINTENANCE_URLS; do wp-maintenance site add "$url" --config wp-maintenance.yaml; done
             echo "configured=true" >> "$GITHUB_OUTPUT"
           elif [ -f wp-maintenance.yaml ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
@@ -39,6 +44,7 @@ jobs:
       - name: Run audits
         if: steps.config.outputs.configured == 'true'
         env:
+          WP_MAINTENANCE_REPORTS_DIR: ${{ github.workspace }}/reports
           WORDFENCE_API_KEY: ${{ secrets.WORDFENCE_API_KEY }}
           WORDPRESS_PRODUCTION: ${{ secrets.WORDPRESS_PRODUCTION }}
           WORDPRESS_STAGING: ${{ secrets.WORDPRESS_STAGING }}

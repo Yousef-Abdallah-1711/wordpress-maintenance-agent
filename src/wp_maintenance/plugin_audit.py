@@ -63,3 +63,32 @@ async def audit_discovered_plugins(discovered: dict[str, str], client: SafeHttp)
     for slug, version in sorted(discovered.items()):
         output.append(await lookup_plugin(slug, version, client, version_verified=False))
     return output
+
+
+def classify_plugin(plugin: dict[str, object], *, verified: bool, metadata_error_kind: object = None) -> dict[str, object]:
+    """Assign an evidence-based classification. Asset ?ver= hints never count as a verified install."""
+    status = plugin.get("status")
+    if metadata_error_kind in {"transport", "rate_limit", "server", "malformed"}:
+        label, action = "NOT_VERIFIABLE", "Retry later; release metadata could not be retrieved."
+    elif metadata_error_kind in {"not_found"} or plugin.get("source_type") == "unverified":
+        label = "UPDATE_SOURCE_UNKNOWN"
+        action = "Commercial or custom plugin: check the vendor for updates using an authenticated inventory."
+    elif verified and status == "OUTDATED":
+        label, action = "VERIFIED_OUTDATED", "Review release notes and update in staging before production."
+    elif verified and status == "CURRENT":
+        label, action = "VERIFIED_CURRENT", "No action."
+    elif plugin.get("latest_version"):
+        label, action = "VERSION_UNKNOWN", "Installed version is not publicly verifiable; confirm it in wp-admin or with the connector."
+    else:
+        label, action = "NOT_VERIFIABLE", "Insufficient public evidence."
+    notes = []
+    if plugin.get("tested_up_to"):
+        notes.append(f"latest release tested up to WordPress {plugin['tested_up_to']}")
+    if plugin.get("requires_php"):
+        notes.append(f"latest release requires PHP {plugin['requires_php']}")
+    plugin["classification"] = label
+    plugin["confidence"] = "high" if verified else "slug exact; version unverified"
+    plugin["recommended_action"] = action
+    plugin["compatibility_notes"] = "; ".join(notes) or "not available"
+    plugin.setdefault("advisory_references", [])
+    return plugin
