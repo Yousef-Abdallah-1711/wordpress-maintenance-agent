@@ -9,14 +9,17 @@ from urllib.parse import urlsplit
 from .http import SafeHttp
 
 
-async def check_pages(urls: list[str], client: SafeHttp, *, concurrency: int = 5) -> list[dict[str, object]]:
+async def check_pages(urls: list[str], client: SafeHttp, *, concurrency: int = 5,
+                      excluded_paths: tuple[str, ...] = ()) -> list[dict[str, object]]:
     semaphore = asyncio.Semaphore(concurrency)
 
     async def one(url: str) -> dict[str, object]:
         async with semaphore:
-            response = await client.get(url)
+            response = await client.get(url, blocked_paths=excluded_paths)
             status = response.status_code
-            if response.error:
+            if response.error and "excluded by site policy" in response.error:
+                classification = "excluded"
+            elif response.error:
                 classification = "timeout" if "Timeout" in response.error else "redirect_loop" if "redirect loop" in response.error else "redirect_limit" if "maximum redirects" in response.error else "tls_error" if "CERTIFICATE_VERIFY_FAILED" in response.error else "network_or_policy_error"
             elif response.status_code is None:
                 classification = "network_failure"

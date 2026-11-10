@@ -45,12 +45,12 @@ def _backup(path: Path) -> None:
 
 def _append_managed(path: Path) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
-    previous = path.read_text(encoding="utf-8") if path.exists() else ""
-    if BEGIN in previous and END in previous:
+    previous = path.read_bytes() if path.exists() else b""
+    if BEGIN.encode() in previous and END.encode() in previous:
         return "already installed"
     _backup(path)
-    separator = "\n" if previous and not previous.endswith("\n") else ""
-    path.write_text(previous + separator + ("\n" if previous else "") + GUIDANCE, encoding="utf-8")
+    separator = b"\n" if previous and not previous.endswith(b"\n") else b""
+    path.write_bytes(previous + separator + (b"\n" if previous else b"") + GUIDANCE.encode("utf-8"))
     return "installed"
 
 
@@ -97,16 +97,15 @@ def install_global() -> list[str]:
     return outcomes
 
 
-def _remove_managed_block(text: str) -> tuple[str, bool]:
-    start = text.find(BEGIN)
-    end = text.find(END)
+def _remove_managed_block(text: bytes) -> tuple[bytes, bool]:
+    start = text.find(BEGIN.encode())
+    end = text.find(END.encode())
     if start < 0 or end < start:
         return text, False
-    end += len(END)
-    if text[end:end + 1] == "\n":
+    end += len(END.encode())
+    if text[end:end + 1] == b"\n":
         end += 1
-    new = text[:start] + text[end:]
-    return new.rstrip() + ("\n" if new.strip() else ""), True
+    return text[:start] + text[end:], True
 
 
 def uninstall_global() -> list[str]:
@@ -116,11 +115,20 @@ def uninstall_global() -> list[str]:
     ]
     for path in locations:
         if path.is_file():
-            text = path.read_text(encoding="utf-8")
+            text = path.read_bytes()
             new, changed = _remove_managed_block(text)
             if changed:
+                for backup in sorted(path.parent.glob(path.name + ".backup.*"), reverse=True):
+                    try:
+                        original = backup.read_bytes()
+                    except OSError:
+                        continue
+                    if any(text == original + separator + GUIDANCE.encode("utf-8")
+                           for separator in (b"", b"\n", b"\n\n")):
+                        new = original
+                        break
                 _backup(path)
-                path.write_text(new, encoding="utf-8")
+                path.write_bytes(new)
                 outcomes.append(f"Removed managed guidance from {path}")
     for path in [Path.home() / ".agents/skills/wordpress-maintenance",
                  Path.home() / ".claude/skills/wordpress-maintenance"]:

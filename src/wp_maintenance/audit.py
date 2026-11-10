@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -19,7 +20,7 @@ from .advisories import check_wordfence_feed
 from .http import SafeHttp
 from .models import AccessMode, AppConfig, AuditResult, Finding, Site
 from .php_audit import evaluate_php
-from .plugin_audit import audit_discovered_plugins
+from .plugin_audit import audit_discovered_plugins, lookup_plugin
 from .security import redact_secrets
 from .sitemap import discover_sitemaps
 
@@ -67,11 +68,40 @@ async def _authenticated_inventory(site: Site, client: SafeHttp) -> dict[str, ob
         data = json.loads(result.body)
     except ValueError as exc:
         raise RuntimeError("connector returned invalid JSON") from exc
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        raise RuntimeError("connector inventory must be a JSON object")
+    plugins = data.get("plugins")
+    if not isinstance(plugins, list) or any(
+        not isinstance(plugin, dict) or not isinstance(plugin.get("slug"), str)
+        for plugin in plugins
+    ):
+        raise RuntimeError("connector inventory contains an invalid plugin list")
+    for field in ("wordpress_version", "php_version", "wordpress_update_version"):
+        if data.get(field) is not None and not isinstance(data.get(field), str):
+            raise RuntimeError(f"connector inventory field {field} must be a string")
+    return data
 
 
 def _priority(severity: str) -> str:
     return {"critical": "P0", "high": "P1", "medium": "P2", "low": "P3"}.get(severity, "P2")
+
+
+def _page_finding_id(url: str, classification: str) -> str:
+    stable_id = hashlib.sha256(f"{url}|{classification}".encode()).hexdigest()[:12]
+    return f"PAGE-{stable_id}"
+
+
+def _plugin_is_outdated(update_transient: object, repository_status: object) -> bool:
+    return bool(update_transient) or repository_status == "OUTDATED"
+
+
+def _plugin_requirements(plugin: dict[str, object], metadata: dict[str, object]) -> tuple[object, object]:
+    installed = plugin.get("version")
+    latest = metadata.get("latest_version")
+    same_release = bool(installed and latest and str(installed) == str(latest))
+    php = plugin.get("requires_php") or (metadata.get("requires_php") if same_release else None)
+    wordpress = plugin.get("requires_wordpress") or (metadata.get("requires_wordpress") if same_release else None)
+    return php, wordpress
 
 
 async def audit_site(site: Site, config: AppConfig) -> AuditResult:
@@ -98,6 +128,10 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
             core = await audit_core(result.url, generator_html, client)
             result.wordpress = core
             result.coverage.append("wordpress_core_metadata")
+            if core.get("lookup_error") and core.get("installed_version"):
+                result.errors.append(f"WordPress core metadata: {core['lookup_error']}")
+            if core.get("stability_error"):
+                result.errors.append(f"WordPress stable-check: {core['stability_error']}")
             if core.get("installed_version") and (core.get("update_available") or core.get("security_relevance")):
                 security_issue = bool(core.get("security_relevance"))
                 severity = "high" if security_issue else "medium"
@@ -120,13 +154,17 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
 
         if inventory:
             result.findings = [finding for finding in result.findings if finding.component != "WordPress core"]
-            if inventory.get("wordpress_version"):
+            if opts.wordpress_core and inventory.get("wordpress_version"):
                 result.wordpress = await audit_core(result.url, f"WordPress {inventory['wordpress_version']}", client)
                 result.coverage.append("authenticated_wordpress_core_update_check")
-            if inventory.get("wordpress_update_version"):
+                if result.wordpress.get("lookup_error"):
+                    result.errors.append(f"WordPress core metadata: {result.wordpress['lookup_error']}")
+                if result.wordpress.get("stability_error"):
+                    result.errors.append(f"WordPress stable-check: {result.wordpress['stability_error']}")
+            if opts.wordpress_core and inventory.get("wordpress_update_version"):
                 result.wordpress["latest_official"] = inventory.get("wordpress_update_version")
                 result.wordpress["update_available"] = str(inventory.get("wordpress_version")) != str(inventory.get("wordpress_update_version"))
-            if result.wordpress.get("installed_version") and (result.wordpress.get("update_available") or result.wordpress.get("security_relevance")):
+            if opts.wordpress_core and result.wordpress.get("installed_version") and (result.wordpress.get("update_available") or result.wordpress.get("security_relevance")):
                 security_issue = bool(result.wordpress.get("security_relevance"))
                 result.findings.append(Finding(id="WP-CORE-SECURITY" if security_issue else "WP-CORE-UPDATE",
                     severity="high" if security_issue else "medium", component="WordPress core",
@@ -134,20 +172,45 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
                     detail=f"Installed {result.wordpress.get('installed_version')}; official offer {result.wordpress.get('latest_official') or 'not returned'}.",
                     evidence=[str(result.wordpress.get("source")), str(result.wordpress.get("stability_source") or "authenticated update transient")],
                     recommendation="Review compatibility and backup readiness, then plan the core maintenance update."))
-            result.php = evaluate_php(str(inventory.get("php_version") or "") or None)
-            result.plugins = list(inventory.get("plugins") or [])
-            result.coverage.extend(["authenticated_wordpress_inventory", "authenticated_php_version", "authenticated_plugin_inventory"])
+            if opts.php:
+                result.php = evaluate_php(str(inventory.get("php_version") or "") or None)
+                result.coverage.append("authenticated_php_version")
+            if opts.plugins:
+                result.plugins = list(inventory["plugins"])
+                result.coverage.append("authenticated_plugin_inventory")
+            result.coverage.append("authenticated_wordpress_inventory")
             for plugin in result.plugins:
                 plugin["installed_version"] = plugin.get("version")
-                if plugin.get("update_available"):
+                plugin["activation_status"] = plugin.get("status", "unknown")
+                metadata: dict[str, object] = {}
+                if opts.plugins and plugin.get("slug") and plugin.get("version"):
+                    metadata = await lookup_plugin(str(plugin["slug"]), str(plugin["version"]), client,
+                                                   version_verified=True)
+                    for field in ("latest_version", "last_updated", "tested_up_to", "requires_php",
+                                  "requires_wordpress", "source_type", "source", "support_status",
+                                  "abandoned_candidate"):
+                        if field in metadata and field not in {"requires_php", "requires_wordpress"}:
+                            plugin[field] = metadata[field]
+                if metadata.get("requires_php"):
+                    plugin["latest_requires_php"] = metadata["requires_php"]
+                if metadata.get("requires_wordpress"):
+                    plugin["latest_requires_wordpress"] = metadata["requires_wordpress"]
+                if metadata.get("metadata_error"):
+                    if metadata.get("metadata_error_kind") in {"transport", "rate_limit", "server", "malformed"}:
+                        result.errors.append(f"Plugin metadata {plugin.get('slug')}: {metadata['metadata_error']}")
+                    else:
+                        result.limitations.append(f"Authoritative release metadata is unavailable for plugin {plugin['slug']}; site update data remains the source of update status.")
+                transient_update = bool(plugin.get("update_available"))
+                if _plugin_is_outdated(transient_update, metadata.get("status")):
+                    plugin["update_available"] = True
                     plugin["status"] = "OUTDATED"
                     result.findings.append(Finding(id=f"PLUGIN-UPDATE-{plugin.get('slug', 'unknown')}", severity="medium",
                         component="plugin", title=f"Update available: {plugin.get('name') or plugin.get('slug')}",
-                        detail=f"Installed {plugin.get('version')}; available {plugin.get('update_version') or 'unknown'}.",
-                        evidence=["Authenticated WordPress connector update transient"], recommendation="Review release notes and compatibility, then update in staging."))
+                        detail=f"Installed {plugin.get('version')}; available {plugin.get('update_version') or metadata.get('latest_version') or 'unknown'}.",
+                        evidence=["Authenticated WordPress connector update transient" if transient_update else str(metadata.get("source"))], recommendation="Review release notes and compatibility, then update in staging."))
                 else:
-                    plugin["status"] = "UNKNOWN"
-                php_required = plugin.get("requires_php")
+                    plugin["status"] = "CURRENT" if metadata.get("status") == "CURRENT" else "UNKNOWN"
+                php_required, wp_required = _plugin_requirements(plugin, metadata)
                 php_installed = result.php.get("installed_version")
                 if php_required and php_installed:
                     try:
@@ -158,13 +221,36 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
                                 evidence=["Authenticated plugin headers", "Authenticated PHP runtime"], recommendation="Check available plugin updates and prepare a staging compatibility plan."))
                     except InvalidVersion:
                         result.limitations.append(f"Could not compare PHP compatibility metadata for plugin {plugin.get('slug', 'unknown')}.")
+                wp_installed = result.wordpress.get("installed_version")
+                if wp_required and wp_installed:
+                    try:
+                        if Version(str(wp_installed)) < Version(str(wp_required)):
+                            result.findings.append(Finding(id=f"PLUGIN-WP-{plugin.get('slug', 'unknown')}", severity="high", component="plugin compatibility",
+                                title=f"WordPress requirement not met: {plugin.get('name') or plugin.get('slug')}",
+                                detail=f"Plugin requires WordPress {wp_required}; site reports WordPress {wp_installed}.",
+                                evidence=[str(metadata.get("source") or "Authenticated plugin headers"), "Authenticated WordPress core inventory"],
+                                recommendation="Review the plugin compatibility requirements before planning a core or plugin update."))
+                    except InvalidVersion:
+                        result.limitations.append(f"Could not compare WordPress compatibility metadata for plugin {plugin.get('slug', 'unknown')}.")
+                if metadata.get("abandoned_candidate"):
+                    result.findings.append(Finding(id=f"PLUGIN-ABANDONED-{plugin.get('slug')}", severity="medium", component="plugin support",
+                        title=f"Potentially abandoned plugin: {plugin.get('name') or plugin.get('slug')}",
+                        detail=f"WordPress.org reports the plugin was last updated {metadata.get('last_updated')}; this is a review signal, not a verified support-status finding.",
+                        evidence=[str(metadata.get("source")), str(metadata.get("last_updated"))],
+                        recommendation="Confirm vendor support and consider a maintained alternative if compatibility or security fixes are unavailable."))
         else:
-            result.php = evaluate_php(None)
+            if opts.php:
+                result.php = evaluate_php(None)
             if opts.plugins:
-                discovered = {slug: version for slug, version in parser.plugin_assets.items() if version != "UNKNOWN"}
+                discovered = dict(parser.plugin_assets)
                 result.plugins = await audit_discovered_plugins(discovered, client)
                 result.coverage.append("public_plugin_asset_hints")
                 for plugin in result.plugins:
+                    if plugin.get("metadata_error"):
+                        if plugin.get("metadata_error_kind") in {"transport", "rate_limit", "server", "malformed"}:
+                            result.errors.append(f"Plugin metadata {plugin.get('slug')}: {plugin['metadata_error']}")
+                        else:
+                            result.limitations.append(f"WordPress.org release metadata is unavailable for plugin slug {plugin.get('slug')}.")
                     if plugin.get("status") == "OUTDATED":
                         result.findings.append(Finding(id=f"PLUGIN-UPDATE-{plugin.get('slug', 'unknown')}", severity="medium",
                             component="plugin", title=f"Plugin update available: {plugin.get('name') or plugin.get('slug')}",
@@ -225,6 +311,12 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
                 "urls_discovered": len(sitemaps.urls), "duplicates": sitemaps.duplicates,
                 "invalid": sitemaps.invalid}
             result.coverage.append("sitemap_discovery")
+            if not sitemaps.discovered:
+                result.limitations.append("No sitemap was found at configured, advertised, or conventional WordPress locations.")
+            for item in sitemaps.invalid:
+                reason = str(item.get("reason", ""))
+                if any(token in reason.lower() for token in ("http ", "timeout", "network", "size limit", "malformed", "unsafe xml")):
+                    result.errors.append(f"Sitemap check incomplete for {item.get('url')}: {reason}")
             if sitemaps.invalid:
                 result.findings.append(Finding(id="SITEMAP-INVALID", severity="medium", component="sitemap",
                     title="Sitemap contains invalid or unchecked entries",
@@ -232,15 +324,20 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
                     evidence=[f"{item.get('url')}: {item.get('reason')}" for item in sitemaps.invalid[:20]],
                     recommendation="Review the listed sitemap URLs, origin approvals, size and format, then run the audit again."))
             if opts.pages and sitemaps.urls:
-                page_results = await check_pages(sitemaps.urls, client, concurrency=opts.concurrency)
                 excluded = [path for path in site.exclude_paths if path]
-                result.pages = [item for item in page_results if not any(urlsplit(str(item["url"])).path.startswith(path) for path in excluded)]
+                allowed_urls = [url for url in sitemaps.urls
+                                if not any(urlsplit(url).path.startswith(path) for path in excluded)]
+                page_results = await check_pages(allowed_urls, client, concurrency=opts.concurrency,
+                                                 excluded_paths=tuple(excluded))
+                result.pages = page_results
                 result.coverage.append("sitemap_page_http_checks")
                 for page in result.pages:
                     classification = page.get("classification")
                     if classification in {"missing", "server_error", "client_error", "network_failure", "network_or_policy_error", "timeout", "redirect_loop", "redirect_limit", "tls_error", "rate_limited", "access_restricted"}:
+                        if classification in {"network_failure", "network_or_policy_error", "timeout", "redirect_loop", "redirect_limit", "tls_error", "rate_limited", "access_restricted"}:
+                            result.errors.append(f"Page check incomplete for {page['url']}: {classification}")
                         severity = "high" if classification in {"server_error", "redirect_loop", "redirect_limit", "tls_error"} else "medium" if classification in {"missing", "client_error", "network_failure", "network_or_policy_error", "timeout"} else "low"
-                        result.findings.append(Finding(id=f"PAGE-{len(result.findings)+1}", severity=severity, component="page",
+                        result.findings.append(Finding(id=_page_finding_id(str(page["url"]), str(classification)), severity=severity, component="page",
                             title=f"Page health issue: {classification}", detail=f"{page['url']} returned {page.get('status')}.",
                             evidence=[str(page.get("url")), str(page.get("status")), str(page.get("classification"))],
                             recommendation="Investigate the route or server response and recheck after remediation."))
@@ -263,4 +360,12 @@ async def run_audit(config: AppConfig, site_ids: set[str] | None = None) -> list
     sites = [site for site in config.sites if site.enabled and (site_ids is None or site.id in site_ids)]
     if site_ids is not None and not site_ids.issubset({site.id for site in config.sites}):
         raise ValueError("unknown site identifier requested")
-    return await asyncio.gather(*(audit_site(site, config) for site in sites))
+    async def isolated(site: Site) -> AuditResult:
+        try:
+            return await audit_site(site, config)
+        except Exception as exc:
+            return AuditResult(site_id=site.id, site_name=site.name, url=str(site.url),
+                environment=site.environment, access_mode=site.access_mode.value,
+                status="INCOMPLETE", finished_at=datetime.now(timezone.utc),
+                errors=[redact_secrets(f"Site audit failed: {type(exc).__name__}: {exc}")])
+    return await asyncio.gather(*(isolated(site) for site in sites))

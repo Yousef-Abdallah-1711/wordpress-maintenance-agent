@@ -52,6 +52,46 @@ async def test_nested_cyclic_index_duplicates_and_cross_origin_rejection(monkeyp
     assert result.duplicates == ["https://example.com/a"]
     assert any("approved" in item["reason"] for item in result.invalid)
     assert result.checked_sitemaps.count("https://example.com/index.xml") == 1
+    assert not any("HTTP 404" in item["reason"] for item in result.invalid)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_advertised_fallback_sitemap_404_is_not_silently_suppressed(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, *args, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))])
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(200, text="Sitemap: https://example.com/wp-sitemap.xml\n"))
+    for path in ("/wp-sitemap.xml", "/sitemap_index.xml", "/sitemap.xml"):
+        respx.get(f"https://example.com{path}").mock(return_value=httpx.Response(404))
+    async with SafeHttp(delay=0, retries=0, allowed_hosts={"example.com"}) as client:
+        result = await discover_sitemaps("https://example.com", client)
+    assert any(item["url"] == "https://example.com/wp-sitemap.xml" and item["reason"] == "HTTP 404" for item in result.invalid)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_nested_index_makes_conventional_child_sitemap_required(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, *args, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))])
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(200, text="Sitemap: https://example.com/wp-sitemap.xml\n"))
+    index = b'<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><sitemap><loc>https://example.com/sitemap.xml</loc></sitemap></sitemapindex>'
+    respx.get("https://example.com/wp-sitemap.xml").mock(return_value=httpx.Response(200, content=index))
+    respx.get("https://example.com/sitemap.xml").mock(return_value=httpx.Response(404))
+    respx.get("https://example.com/sitemap_index.xml").mock(return_value=httpx.Response(404))
+    async with SafeHttp(delay=0, retries=0, allowed_hosts={"example.com"}) as client:
+        result = await discover_sitemaps("https://example.com", client)
+    assert any(item["url"] == "https://example.com/sitemap.xml" and item["reason"] == "HTTP 404" for item in result.invalid)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_configured_fallback_path_is_required_after_normalization(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, *args, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))])
+    respx.get("https://example.com/robots.txt").mock(return_value=httpx.Response(404))
+    for path in ("/wp-sitemap.xml", "/sitemap_index.xml", "/sitemap.xml"):
+        respx.get(f"https://example.com{path}").mock(return_value=httpx.Response(404))
+    async with SafeHttp(delay=0, retries=0, allowed_hosts={"example.com"}) as client:
+        result = await discover_sitemaps("https://example.com", client,
+            configured=["HTTPS://EXAMPLE.COM/wp-sitemap.xml"])
+    assert any(item["url"] == "https://example.com/wp-sitemap.xml" and item["reason"] == "HTTP 404" for item in result.invalid)
 
 
 def test_reject_decompression_bomb_with_bounded_read():

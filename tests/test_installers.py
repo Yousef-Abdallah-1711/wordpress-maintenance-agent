@@ -49,3 +49,18 @@ def test_codex_active_override_is_extended_instead_of_inactive_agents_file(tmp_p
     integrations.install_global()
     assert "BEGIN WordPress Maintenance Agent" in (home / "AGENTS.override.md").read_text(encoding="utf-8")
     assert "BEGIN WordPress Maintenance Agent" not in (home / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_uninstall_restores_original_trailing_whitespace_exactly(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    monkeypatch.setattr(integrations.shutil, "which", lambda name: "fake" if name == "codex" else None)
+    home = tmp_path / ".codex"
+    home.mkdir()
+    target = home / "AGENTS.md"
+    original = b"Existing rules with trailing spaces  \r\n\r\n"
+    target.write_bytes(original)
+    monkeypatch.setattr(integrations, "_skill_source", lambda: Path(__file__).parents[1] / "skills/wordpress-maintenance")
+    integrations.install_global()
+    integrations.uninstall_global()
+    assert target.read_bytes() == original

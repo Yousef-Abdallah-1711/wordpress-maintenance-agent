@@ -161,11 +161,15 @@ def _cmd_report(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return EXIT_CONFIGURATION
-    candidates = sorted(base.glob("*/*.md"), key=lambda item: item.stat().st_mtime, reverse=True)
+    candidates = sorted((item for item in base.rglob("*.md")
+                         if (item.parent / ".wp-maintenance-agent-report").is_file()),
+                        key=lambda item: item.stat().st_mtime, reverse=True)
     if args.site:
         candidates = [p for p in candidates if p.name == f"{args.site}.md"]
     if not candidates:
-        json_candidates = sorted(base.glob("*/results.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        json_candidates = sorted((item for item in base.rglob("results.json")
+                                  if (item.parent / ".wp-maintenance-agent-report").is_file()),
+                                 key=lambda item: item.stat().st_mtime, reverse=True)
         for json_file in json_candidates:
             try:
                 payload = json.loads(json_file.read_text(encoding="utf-8"))

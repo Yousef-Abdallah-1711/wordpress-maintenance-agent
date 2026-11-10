@@ -69,7 +69,7 @@ Results are saved under `reports/YYYY-MM-DD/` (ignored by Git) with a per-site M
 
 ## Weekend automation
 
-Default preference: Sunday 03:00 in the YAML timezone. Install a scheduler with `wp-maintenance schedule install --config wp-maintenance.yaml`; check it with `wp-maintenance schedule status`. Linux can use cron or `--method systemd`; Windows uses Task Scheduler. Cron and Windows Task Scheduler use the machine's local timezone. systemd timers use local time unless configured otherwise. DST changes can shift UTC execution time.
+Default preference: Sunday 03:00 in the YAML timezone. Install a scheduler with `wp-maintenance schedule install --config wp-maintenance.yaml`; check it with `wp-maintenance schedule status`. Linux cron and systemd use the configured timezone. Windows Task Scheduler requires the configured timezone rules to match the machine's local timezone. GitHub Actions uses UTC. DST changes are handled by the selected scheduler's timezone rules.
 
 GitHub Actions runs weekly Sunday at 00:00 UTC and supports manual dispatch. GitHub cron uses UTC, not `schedule.timezone`. Add a `WP_MAINTENANCE_CONFIG_B64` repository secret containing base64-encoded YAML and environment secrets for credentials. Reports are uploaded as workflow artifacts, not committed. Do not put private site details in a public repository; artifacts in public repositories may be visible to repository readers.
 
@@ -83,7 +83,7 @@ Only agent-owned guidance blocks and skill directories marked by the installer a
 
 ## Security and limitations
 
-See [Security](SECURITY.md), [Installation](docs/INSTALLATION.md), [Configuration](docs/CONFIGURATION.md), [Authentication](docs/AUTHENTICATION.md), [Automation](docs/AUTOMATION.md), and [Report format](docs/REPORT_FORMAT.md). DNS is checked before each request, but the system HTTP stack performs its own subsequent DNS lookup, so this does not fully pin the resolved address against a hostile DNS rebinding race. Do not use this tool as a substitute for a network egress firewall.
+See [Security](SECURITY.md), [Installation](docs/INSTALLATION.md), [Configuration](docs/CONFIGURATION.md), [Authentication](docs/AUTHENTICATION.md), [Automation](docs/AUTOMATION.md), and [Report format](docs/REPORT_FORMAT.md). Each socket connection pins a validated public DNS address while preserving the hostname for TLS. Keep network egress controls enabled as a defense in depth.
 
 ## Development
 

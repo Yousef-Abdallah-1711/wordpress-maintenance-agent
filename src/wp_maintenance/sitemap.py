@@ -58,26 +58,40 @@ async def discover_sitemaps(site_url: str, client: SafeHttp, *, configured: list
     origin_host = base.hostname or ""
     allowed = {origin_host, *(approved_hosts or set())}
     result = SitemapResult()
-    candidates = list(configured or [])
+    required_candidates = list(configured or [])
     robots = await client.get(f"{base.scheme}://{base.netloc}/robots.txt")
     if robots.status_code == 200:
         for line in robots.body.decode("utf-8", "replace").splitlines():
             key, sep, value = line.partition(":")
             if sep and key.strip().lower() == "sitemap":
-                candidates.append(value.strip())
-    candidates.extend([f"{base.scheme}://{base.netloc}/wp-sitemap.xml",
-                       f"{base.scheme}://{base.netloc}/sitemap_index.xml",
-                       f"{base.scheme}://{base.netloc}/sitemap.xml"])
-    queue: list[tuple[str, int]] = []
-    for candidate in candidates:
+                advertised = value.strip()
+                required_candidates.append(advertised)
+    elif robots.status_code is None or robots.status_code == 429 or (robots.status_code is not None and robots.status_code >= 500):
+        result.invalid.append({"url": f"{base.scheme}://{base.netloc}/robots.txt",
+                               "reason": robots.error or f"HTTP {robots.status_code}"})
+    raw_fallback_candidates = {
+        f"{base.scheme}://{base.netloc}/wp-sitemap.xml",
+        f"{base.scheme}://{base.netloc}/sitemap_index.xml",
+        f"{base.scheme}://{base.netloc}/sitemap.xml",
+    }
+    fallback_candidates = {validate_public_url(item, allowed_hosts=allowed) for item in raw_fallback_candidates}
+    required_queue: list[tuple[str, int]] = []
+    optional_queue: list[tuple[str, int]] = []
+    candidate_pairs = [(item, True) for item in required_candidates] + [(item, False) for item in sorted(raw_fallback_candidates)]
+    for candidate, required in candidate_pairs:
         try:
-            queue.append((validate_public_url(candidate, allowed_hosts=allowed), 0))
+            normalized = validate_public_url(candidate, allowed_hosts=allowed)
+            target = required_queue if required else optional_queue
+            if all(item != normalized for item, _ in target):
+                target.append((normalized, 0))
         except UnsafeTarget as exc:
             result.invalid.append({"url": candidate, "reason": str(exc)})
     seen_maps: set[str] = set()
     seen_urls: set[str] = set()
     max_sitemaps = max(16, min(max_pages, 1000))
-    while queue and len(result.urls) < max_pages:
+    while (required_queue or optional_queue) and len(result.urls) < max_pages:
+        is_required = bool(required_queue)
+        queue = required_queue if is_required else optional_queue
         sitemap_url, depth = queue.pop(0)
         if sitemap_url in seen_maps:
             continue
@@ -91,6 +105,9 @@ async def discover_sitemaps(site_url: str, client: SafeHttp, *, configured: list
         fetched = await client.get(sitemap_url, max_bytes=max_bytes)
         result.checked_sitemaps.append(sitemap_url)
         if fetched.status_code != 200:
+            if not is_required and sitemap_url in fallback_candidates and fetched.status_code in {404, 410}:
+                seen_maps.discard(sitemap_url)
+                continue
             result.invalid.append({"url": sitemap_url, "reason": fetched.error or f"HTTP {fetched.status_code}"})
             continue
         result.discovered.append(sitemap_url)
@@ -103,8 +120,8 @@ async def discover_sitemaps(site_url: str, client: SafeHttp, *, configured: list
             try:
                 normalized = validate_public_url(loc, allowed_hosts=allowed)
                 if kind == "sitemapindex":
-                    if normalized not in seen_maps and all(item != normalized for item, _ in queue):
-                        queue.append((normalized, depth + 1))
+                    if normalized not in seen_maps and all(item != normalized for item, _ in required_queue):
+                        required_queue.append((normalized, depth + 1))
                 elif normalized in seen_urls:
                     result.duplicates.append(normalized)
                 elif len(result.urls) < max_pages:
@@ -112,7 +129,8 @@ async def discover_sitemaps(site_url: str, client: SafeHttp, *, configured: list
                     result.urls.append(normalized)
             except UnsafeTarget as exc:
                 result.invalid.append({"url": loc, "reason": str(exc)})
-    if queue:
-        result.invalid.append({"url": queue[0][0], "reason": "URL limit reached; sitemap entries left unchecked"})
+    remaining = required_queue or optional_queue
+    if remaining:
+        result.invalid.append({"url": remaining[0][0], "reason": "URL limit reached; sitemap entries left unchecked"})
     result.discovered = list(dict.fromkeys(result.discovered))
     return result

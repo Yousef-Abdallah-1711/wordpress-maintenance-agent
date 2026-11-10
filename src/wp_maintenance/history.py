@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def previous_result(reports_dir: Path, site_id: str, current_run: Path | None = None) -> dict | None:
-    candidates = sorted(reports_dir.glob("*/results.json"), reverse=True)
+    candidates = sorted(reports_dir.rglob("results.json"), reverse=True)
     for path in candidates:
         if current_run and path.resolve() == current_run.resolve():
             continue

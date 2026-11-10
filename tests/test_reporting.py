@@ -28,6 +28,18 @@ def test_history_delta():
     assert compare_results(new, old) == {"new": ["c"], "resolved": ["a"], "persistent": ["b"]}
 
 
+def test_multiple_same_day_runs_keep_history_and_previous_evidence(tmp_path):
+    finding = Finding(id="PLUGIN-UPDATE-sample", severity="medium", component="plugin",
+        title="Update available", detail="An update is offered.")
+    result = AuditResult(site_id="sample", site_name="Sample", url="https://example.test",
+        environment="production", access_mode="public", status="ACTION_REQUIRED", findings=[finding])
+    first = write_reports([result], tmp_path)
+    second = write_reports([result], tmp_path)
+    assert first != second
+    payload = json.loads((second / "results.json").read_text(encoding="utf-8"))
+    assert payload["sites"][0]["previous_audit"]["persistent"] == ["PLUGIN-UPDATE-sample"]
+
+
 def test_notification_preferences_validate_without_exposing_secrets():
     from wp_maintenance.models import AppConfig
     config = AppConfig.model_validate({"sites": [], "notifications": {"enabled": True, "webhook_url_ref": "AUDIT_HOOK", "on_status": ["ACTION_REQUIRED"]}})

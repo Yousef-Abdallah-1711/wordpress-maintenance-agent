@@ -46,7 +46,11 @@ async def audit_core(site_url: str, html: str, client: SafeHttp) -> dict[str, ob
         stable_url = "https://api.wordpress.org/core/stable-check/1.0/?" + urlencode({"version": installed})
         stable = await client.get(stable_url)
         if stable.status_code == 200:
-            status = stable.body.decode("ascii", "replace").strip().lower()
+            try:
+                statuses = json.loads(stable.body)
+                status = str(statuses.get(installed, "")).strip().lower() if isinstance(statuses, dict) else ""
+            except (ValueError, TypeError):
+                status = ""
             if status in {"latest", "outdated", "insecure"}:
                 result["stability_status"] = status
                 result["security_relevance"] = status == "insecure"
@@ -55,4 +59,8 @@ async def audit_core(site_url: str, html: str, client: SafeHttp) -> dict[str, ob
                     result["update_available"] = False
                 elif status in {"outdated", "insecure"}:
                     result["update_available"] = True
+            else:
+                result["stability_error"] = "official stable-check response did not contain a recognized status for the installed version"
+        else:
+            result["stability_error"] = stable.error or f"official stable-check API returned HTTP {stable.status_code}"
     return result

@@ -19,15 +19,18 @@ async def lookup_plugin(slug: str, installed_version: str, client: SafeHttp, *, 
                                "latest_version": None, "source_type": "wordpress.org", "source": source, "status": "UNKNOWN"}
     if response.status_code != 200:
         base["metadata_error"] = response.error or f"HTTP {response.status_code}"
+        base["metadata_error_kind"] = "transport" if response.status_code is None else "rate_limit" if response.status_code == 429 else "server" if response.status_code >= 500 else "not_found" if response.status_code == 404 else "http"
         return base
     try:
         data = json.loads(response.body)
     except ValueError:
         base["metadata_error"] = "invalid JSON from WordPress.org plugin API"
+        base["metadata_error_kind"] = "malformed"
         return base
     if not isinstance(data, dict) or not data.get("version"):
         base["source_type"] = "unverified"
         base["metadata_error"] = "plugin slug not found in WordPress.org"
+        base["metadata_error_kind"] = "not_found"
         return base
     latest = str(data["version"])
     status = "UNKNOWN"

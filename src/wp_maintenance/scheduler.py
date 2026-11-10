@@ -5,11 +5,15 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .models import Schedule
 
@@ -22,6 +26,48 @@ def _ps_quote(value: str | Path) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def _systemd_quote(value: str | Path) -> str:
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$")
+    return f'"{escaped}"'
+
+
+def _timezone_matches_local(name: str) -> bool:
+    zone = ZoneInfo(name)
+    for year in (datetime.now().year, datetime.now().year + 1):
+        for month in range(1, 13):
+            wall_time = datetime(year, month, 15, 12, 0)
+            if abs(time.mktime(wall_time.timetuple()) - wall_time.replace(tzinfo=zone).timestamp()) > 1:
+                return False
+    return True
+
+
+def _system_timezone_name() -> str:
+    configured = os.environ.get("TZ", "").lstrip(":")
+    if configured:
+        try:
+            ZoneInfo(configured)
+            return configured
+        except Exception:
+            pass
+    try:
+        system_file = Path("/etc/timezone")
+        if system_file.is_file():
+            candidate = system_file.read_text(encoding="utf-8").strip()
+            ZoneInfo(candidate)
+            return candidate
+        localtime = Path("/etc/localtime").resolve()
+        parts = localtime.parts
+        if "zoneinfo" in parts:
+            candidate = "/".join(parts[parts.index("zoneinfo") + 1:])
+            ZoneInfo(candidate)
+            return candidate
+    except (OSError, ValueError):
+        pass
+    if datetime.now().astimezone().utcoffset().total_seconds() == 0:
+        return "UTC"
+    raise RuntimeError("cannot determine the machine's IANA timezone; set TZ before installing a cron schedule")
+
+
 def install_schedule(schedule: Schedule, *, config: Path, method: str = "auto") -> str:
     system = platform.system()
     if method == "auto":
@@ -29,6 +75,8 @@ def install_schedule(schedule: Schedule, *, config: Path, method: str = "auto") 
     if method == "task-scheduler":
         if system != "Windows":
             raise RuntimeError("Task Scheduler installation is available only on Windows")
+        if not _timezone_matches_local(schedule.timezone):
+            raise RuntimeError("Windows Task Scheduler uses local time; set schedule.timezone to the machine's local timezone")
         day = "SUN" if schedule.day == "sunday" else "SAT"
         executable = shutil.which("wp-maintenance")
         runner = f"& {_ps_quote(executable)}" if executable else f"& {_ps_quote(sys.executable)} -m wp_maintenance.cli"
@@ -47,9 +95,12 @@ def install_schedule(schedule: Schedule, *, config: Path, method: str = "auto") 
         if marker in text and end_marker in text:
             start, end = text.index(marker), text.index(end_marker) + len(end_marker)
             text = text[:start] + text[end:]
-        block = f"{marker}\n{command}\n{end_marker}\n"
+        assignments = re.findall(r"^CRON_TZ=([^\r\n]+)", text, flags=re.MULTILINE)
+        restore_timezone = assignments[-1] if assignments else _system_timezone_name()
+        command = command.replace("%", "\\%")
+        block = f"{marker}\nCRON_TZ={schedule.timezone}\n{command}\nCRON_TZ={restore_timezone}\n{end_marker}\n"
         subprocess.run(["crontab", "-"], input=(text.rstrip() + "\n\n" + block), check=True, text=True)
-        return f"Installed user cron schedule for {schedule.day} {schedule.time} in the machine timezone."
+        return f"Installed user cron schedule for {schedule.day} {schedule.time} in {schedule.timezone}."
     if method == "systemd":
         if system != "Linux":
             raise RuntimeError("systemd user timer installation is available only on Linux")
@@ -59,8 +110,8 @@ def install_schedule(schedule: Schedule, *, config: Path, method: str = "auto") 
         executable = shutil.which("wp-maintenance") or sys.executable
         day = "Sun" if schedule.day == "sunday" else "Sat"
         module_args = "" if shutil.which("wp-maintenance") else " -m wp_maintenance.cli"
-        (unit_dir / f"{stem}.service").write_text(f"[Unit]\nDescription=WordPress Maintenance Agent audit\n\n[Service]\nType=oneshot\nWorkingDirectory={Path.cwd()}\nExecStart={executable}{module_args} audit --all --config {config.resolve()}\n", encoding="utf-8")
-        (unit_dir / f"{stem}.timer").write_text(f"[Unit]\nDescription=Weekly WordPress Maintenance Agent audit\n\n[Timer]\nOnCalendar={day} *-*-* {schedule.time}:00\nPersistent=true\nUnit={stem}.service\n\n[Install]\nWantedBy=timers.target\n", encoding="utf-8")
+        (unit_dir / f"{stem}.service").write_text(f"[Unit]\nDescription=WordPress Maintenance Agent audit\n\n[Service]\nType=oneshot\nWorkingDirectory={_systemd_quote(Path.cwd())}\nExecStart={_systemd_quote(executable)}{module_args} audit --all --config {_systemd_quote(config.resolve())}\n", encoding="utf-8")
+        (unit_dir / f"{stem}.timer").write_text(f"[Unit]\nDescription=Weekly WordPress Maintenance Agent audit\n\n[Timer]\nOnCalendar={day} *-*-* {schedule.time}:00 {schedule.timezone}\nPersistent=true\nUnit={stem}.service\n\n[Install]\nWantedBy=timers.target\n", encoding="utf-8")
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, capture_output=True, text=True)
         subprocess.run(["systemctl", "--user", "enable", "--now", f"{stem}.timer"], check=True, capture_output=True, text=True)
         return f"Installed and enabled systemd user timer {stem}.timer for {day} {schedule.time} in local time."
