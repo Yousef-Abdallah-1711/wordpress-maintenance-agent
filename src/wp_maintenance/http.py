@@ -16,7 +16,7 @@ import httpcore
 
 from .security import UnsafeTarget, validate_public_url
 
-USER_AGENT = "WordPressMaintenanceAgent/0.2 (+https://github.com/Yousef-Abdallah-1711/wordpress-maintenance-agent)"
+USER_AGENT = "WordPressMaintenanceAgent/0.3 (+https://github.com/Yousef-Abdallah-1711/wordpress-maintenance-agent)"
 
 
 def _canonical_path(path: str) -> str:

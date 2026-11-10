@@ -50,3 +50,17 @@ The default directory is `~/wp-maintenance-reports` (override with `--output` or
 ## Registry and configuration location
 
 `site add <url>` stores sites in `$WP_MAINTENANCE_CONFIG`, else `./wp-maintenance.yaml` if present, else `~/.wp-maintenance/config.yaml`. Authenticated mode (`--access-mode authenticated --id ... --credentials-ref ...`) is unchanged.
+
+## Inventory and batch commands (v0.3)
+
+```text
+wp-maintenance site list|show <id>|add <url> [--name N] [--id I] [--tag T]|remove <id>|enable <id>|disable <id>|validate [--offline]
+wp-maintenance audit-batch [--inventory config/websites.yaml] [--scope all|single|custom_url] [--site ID] [--url URL]
+                           [--max-urls N] [--report-mode standard|detailed] [--output reports] [--history-dir DIR]
+                           [--retention-days N] [--site-concurrency 2] [--site-timeout 1800] [--fail-on critical,incomplete]
+                           [--notify github-issues] [--allow-public-issues] [--dry-run]
+```
+
+`site` commands use the inventory when `--inventory` / `WP_MAINTENANCE_INVENTORY` is given or `config/websites.yaml` exists, unless the legacy `--config` registry is chosen explicitly. `audit-batch` resolves targets with the precedence described in [GITHUB_ACTIONS.md](GITHUB_ACTIONS.md), audits each site in isolation (bounded parallelism, per-site wall-clock limit, graceful cancellation), writes `reports/YYYY-MM-DD/{summary.md,summary.json,weekly-delta.md,sites/<id>/report.{md,json}}`, loads/saves per-site history in `--history-dir`, and on GitHub Actions appends the job summary and step outputs.
+
+Batch exit codes: 0 pass/warnings, 2 findings need action, 3 invalid selection or inventory, 5 any incomplete audit, 7 any critical finding, 130 cancelled. `--fail-on` limits which conditions produce a non-zero code (`never` always returns 0 except for cancellation).

@@ -24,3 +24,7 @@ Each run executes `wp-maintenance audit --all` against the registry (`~/.wp-main
 **Time zones.** Without `--timezone` the schedule uses the machine's local time (Task Scheduler, cron, systemd). With `--timezone` cron/systemd honour the zone; Windows Task Scheduler requires it to equal the machine's zone. GitHub Actions cron is always UTC.
 
 **Limitations.** A local schedule only runs while the machine is on (Windows: while the user is logged on; missed runs are not replayed by Task Scheduler as installed, systemd uses `Persistent=true`). Codex and Claude Code do not need to be open. For always-on monitoring use the GitHub Actions workflow: set a repository **variable** `WP_MAINTENANCE_URLS` (space or newline separated) and the reports are uploaded as artifacts.
+
+## GitHub Actions is the primary platform (v0.3)
+
+Hosted weekly monitoring replaces local schedulers for most users: see [GITHUB_ACTIONS.md](GITHUB_ACTIONS.md). The local Task Scheduler / cron / systemd options above remain available for machines that should audit locally.

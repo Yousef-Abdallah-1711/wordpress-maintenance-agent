@@ -35,7 +35,7 @@ def _cell(value: object) -> str:
     return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
 
-def _md(result: AuditResult, delta: dict[str, list[str]]) -> str:
+def _md(result: AuditResult, delta: dict, detailed: bool = False) -> str:
     duration = (result.finished_at - result.started_at).total_seconds() if result.finished_at else 0.0
     counts = {name: sum(f.severity == name for f in result.findings) for name in SEVERITY_ORDER}
     wp, php, ssl_info, http = result.wordpress, result.php, result.ssl, result.http
@@ -116,8 +116,9 @@ def _md(result: AuditResult, delta: dict[str, list[str]]) -> str:
         f"- Response time: median {times[len(times)//2] if times else 0:.0f} ms, p95 {p95:.0f} ms, max {times[-1] if times else 0:.0f} ms", "",
         "## 9. Broken Page URLs", ""]
     issues = [p for p in pages if p.get("classification") in BROKEN]
-    lines += [f"- `{p.get('url')}` — HTTP {p.get('status') or 'unavailable'} ({p.get('classification')}); final: {p.get('final_url')}" for p in issues[:MAX_LISTED]]
-    if len(issues) > MAX_LISTED:
+    limit = len(issues) if detailed else MAX_LISTED
+    lines += [f"- `{p.get('url')}` — HTTP {p.get('status') or 'unavailable'} ({p.get('classification')}); final: {p.get('final_url')}" for p in issues[:limit]]
+    if len(issues) > limit:
         lines.append(f"- ... {len(issues) - MAX_LISTED} more; see the JSON report for the complete list.")
     if not issues:
         lines.append("No broken URL findings among the pages that were checked." if pages else "No pages were checked.")
@@ -146,12 +147,29 @@ def _md(result: AuditResult, delta: dict[str, list[str]]) -> str:
         f"- Meta robots: {seo.get('meta_robots') or 'none'}; X-Robots-Tag: {seo.get('x_robots_tag') or 'none'}",
         f"- Sitemap available: {'yes' if sm.get('discovered') else 'no'}",
         f"- Homepage response time: {http.get('homepage_response_ms', 'UNKNOWN')} ms (server response only; no Lighthouse or Core Web Vitals measured)", ""]
-    lines += ["## 12. Previous Audit Comparison", "", f"- New issues: {', '.join(delta['new'][:30]) or 'none'}",
-        f"- Resolved issues: {', '.join(delta['resolved'][:30]) or 'none'}", f"- Persistent issues: {len(delta['persistent'])}", ""]
+    lines += ["## 12. Previous Audit Comparison", ""]
+    if delta.get("available") is False:
+        lines += [f"- Historical comparison UNAVAILABLE: {delta.get('reason', 'no previous evidence')}"]
+    else:
+        prev = delta.get("previous") or {}
+        if prev:
+            lines.append(f"- Compared with: run {prev.get('run_id', '?')} ({prev.get('audit_date', '?')}, status {prev.get('status', '?')})")
+        lines += [f"- New issues: {', '.join(delta['new'][:30]) or 'none'}",
+            f"- Resolved issues (verified): {', '.join(delta['resolved'][:30]) or 'none'}",
+            f"- Persistent issues: {len(delta['persistent'])}"]
+        for item in delta.get("unverified", [])[:20]:
+            lines.append(f"- Unverified change `{item['id']}`: {item['reason']}")
+        for change in delta.get("changes", [])[:30]:
+            lines.append(f"- Change ({change['type']}): {change['detail']}")
+    lines.append("")
+    if detailed:
+        lines += ["## Appendix: All Checked URLs", "", "| URL | Status | Class | ms |", "|---|---:|---|---:|"]
+        lines += [f"| {_cell(p.get('url'))} | {p.get('status') or '—'} | {p.get('classification')} | {p.get('elapsed_ms')} |" for p in result.pages]
+        lines.append("")
     lines += ["## 13. Prioritized Maintenance Actions", ""]
     ordered = sorted(result.findings, key=lambda f: SEVERITY_ORDER.index(f.severity) if f.severity in SEVERITY_ORDER else 9)
     page_findings = [f for f in ordered if f.component == "page"]
-    shown = [f for f in ordered if f.component != "page"] + page_findings[:25]
+    shown = [f for f in ordered if f.component != "page"] + (page_findings if detailed else page_findings[:25])
     for severity in SEVERITY_ORDER:
         group = [f for f in shown if f.severity == severity]
         if group:
@@ -161,7 +179,7 @@ def _md(result: AuditResult, delta: dict[str, list[str]]) -> str:
                           f"  - Action: {f.recommendation or 'Investigate.'}",
                           f"  - Evidence: {'; '.join(f.evidence) or 'none recorded'}"]
             lines.append("")
-    if len(page_findings) > 25:
+    if not detailed and len(page_findings) > 25:
         lines += [f"- {len(page_findings) - 25} further page-health findings omitted here; see Section 9 and the JSON report.", ""]
     if not result.findings:
         lines += ["No remediation actions were supported by the collected evidence.", ""]

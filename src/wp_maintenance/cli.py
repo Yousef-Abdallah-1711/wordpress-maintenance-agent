@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -20,8 +22,12 @@ from .locking import audit_lock
 from .models import AppConfig, Schedule
 from .reporting import _safe_id, site_slug, write_reports, write_site_layout
 from .scheduler import install_schedule, remove_schedule, schedule_status
-from .urlmode import (InvalidSiteUrl, build_site, build_url_config, default_config_path, default_reports_dir,
-                      normalize_site_url)
+from .batch import apply_fail_policy, emit_github, exit_code as batch_exit_code, run_targets, write_batch
+from .inventory import (DEFAULT_INVENTORY, InventoryError, add_site, load_inventory, remove_site, set_enabled,
+                        validate_inventory)
+from .notifications import NOTIFIERS
+from .targets import REPORT_MODES, SCOPES, TargetError, resolve_targets, validate_selection
+from .urlmode import (InvalidSiteUrl, build_site, build_url_config, default_config_path, default_reports_dir)
 
 EXIT_OK = 0
 EXIT_FINDINGS = 2
@@ -39,9 +45,12 @@ def _parser() -> argparse.ArgumentParser:
     init = subs.add_parser("init", help="Create an example configuration")
     init.add_argument("--config", default=None)
     sites = subs.add_parser("site", help="Manage registered websites (add <url>, list, remove <id|url>)")
-    sites.add_argument("action", choices=["add", "list", "remove"])
+    sites.add_argument("action", choices=["add", "list", "remove", "enable", "disable", "show", "validate"])
     sites.add_argument("target", nargs="?", help="Website URL (add) or site id/URL (remove)")
-    sites.add_argument("--config", default=None)
+    sites.add_argument("--config", default=None, help="Legacy per-user registry (used when no inventory is selected)")
+    sites.add_argument("--inventory", default=None, help="Inventory file (default: config/websites.yaml when it exists)")
+    sites.add_argument("--tag", action="append", default=None, help="Tag for `site add` (repeatable)")
+    sites.add_argument("--offline", action="store_true", help="Skip DNS resolution while validating")
     sites.add_argument("--id")
     sites.add_argument("--name")
     sites.add_argument("--url")
@@ -59,6 +68,23 @@ def _parser() -> argparse.ArgumentParser:
     audit.add_argument("--max-pages", type=int, default=None, help="Maximum sitemap URLs to check")
     audit.add_argument("--concurrency", type=int, default=None, help="Concurrent page checks (default 5)")
     audit.add_argument("--mode", choices=["read-only"], default="read-only")
+    batch = subs.add_parser("audit-batch", help="Audit the inventory (or one site / one URL) with per-site isolation")
+    batch.add_argument("--inventory", default=str(DEFAULT_INVENTORY))
+    batch.add_argument("--scope", choices=list(SCOPES), default="all")
+    batch.add_argument("--site", default=None, help="Site id (scope single)")
+    batch.add_argument("--url", default=None, help="One-time URL (scope custom_url); not added to the inventory")
+    batch.add_argument("--max-urls", default=None, help="Override the per-site sitemap URL limit for this run")
+    batch.add_argument("--report-mode", choices=list(REPORT_MODES), default="standard")
+    batch.add_argument("--output", default="reports", help="Directory for reports/YYYY-MM-DD/")
+    batch.add_argument("--history-dir", default=os.environ.get("WP_MAINTENANCE_HISTORY_DIR") or None)
+    batch.add_argument("--retention-days", type=int, default=365)
+    batch.add_argument("--site-concurrency", type=int, default=2, help="Sites audited in parallel")
+    batch.add_argument("--site-timeout", type=float, default=1800, help="Wall-clock seconds allowed per site")
+    batch.add_argument("--run-id", default=None)
+    batch.add_argument("--fail-on", default=None, help="Comma list of: critical, high, incomplete, never")
+    batch.add_argument("--notify", choices=["github-issues"], default=None)
+    batch.add_argument("--allow-public-issues", action="store_true")
+    batch.add_argument("--dry-run", action="store_true", help="Resolve and validate targets, then exit")
     report = subs.add_parser("report", help="Display the latest report")
     report.add_argument("--latest", action="store_true")
     report.add_argument("--site")
@@ -99,7 +125,71 @@ def _cmd_init(config_path: Path) -> int:
     return EXIT_OK
 
 
+def _inventory_for_site(args: argparse.Namespace) -> Path | None:
+    """Inventory mode when --inventory/WP_MAINTENANCE_INVENTORY is given or config/websites.yaml exists,
+    unless the legacy --config registry was chosen explicitly."""
+    explicit = getattr(args, "inventory", None) or os.environ.get("WP_MAINTENANCE_INVENTORY")
+    if explicit:
+        return Path(explicit)
+    if getattr(args, "config", None):
+        return None
+    if DEFAULT_INVENTORY.is_file() or args.action in {"enable", "disable", "show", "validate"}:
+        return DEFAULT_INVENTORY
+    return None
+
+
+def _cmd_site_inventory(args: argparse.Namespace, path: Path) -> int:
+    try:
+        if args.action == "list":
+            inv = load_inventory(path)
+            for site in inv.sites:
+                print(f"{site.id}\t{'enabled' if site.enabled else 'disabled'}\t{site.url}\t{site.name}\t{','.join(site.tags)}")
+            if not inv.sites:
+                print(f"No sites in {path}.")
+            return EXIT_OK
+        if args.action == "show":
+            site = load_inventory(path).get(args.target or args.id or "")
+            print(yaml.safe_dump(site.model_dump(mode="json"), sort_keys=False).rstrip())
+            return EXIT_OK
+        if args.action == "validate":
+            inv, problems = validate_inventory(path, resolve_dns=not args.offline)
+            enabled = sum(s.enabled for s in inv.sites)
+            for problem in problems:
+                print(f"PROBLEM {problem}", file=sys.stderr)
+            print(f"{path}: {len(inv.sites)} sites ({enabled} enabled, {len(inv.sites) - enabled} disabled); "
+                  f"{'valid' if not problems else str(len(problems)) + ' problem(s)'}")
+            return EXIT_OK if not problems else EXIT_CONFIGURATION
+        if args.action == "add":
+            url = args.url or args.target
+            if not url:
+                print("site add requires a website URL", file=sys.stderr)
+                return EXIT_CONFIGURATION
+            entry = add_site(path, url, name=args.name, site_id=args.id, tags=args.tag, resolve_dns=not args.offline)
+            print(f"Added '{entry.id}' ({entry.url}) to {path}.")
+            return EXIT_OK
+        key = args.target or args.id
+        if not key:
+            print(f"site {args.action} requires a site id", file=sys.stderr)
+            return EXIT_CONFIGURATION
+        if args.action == "remove":
+            removed = remove_site(path, key)
+            print(f"Removed '{removed.id}' ({removed.url}) from {path}. Past reports are untouched.")
+        else:
+            entry, changed = set_enabled(path, key, args.action == "enable")
+            print(f"Site '{entry.id}' {'is now' if changed else 'was already'} {args.action}d.")
+        return EXIT_OK
+    except InventoryError as exc:
+        print(f"Inventory error: {exc}", file=sys.stderr)
+        return EXIT_CONFIGURATION
+
+
 def _cmd_site(args: argparse.Namespace) -> int:
+    inventory = _inventory_for_site(args)
+    if inventory is not None:
+        return _cmd_site_inventory(args, inventory)
+    if args.action in {"enable", "disable", "show", "validate"}:
+        print(f"site {args.action} requires an inventory file (--inventory)", file=sys.stderr)
+        return EXIT_CONFIGURATION
     path = _config_path(args.config)
     if args.action == "list":
         try:
@@ -267,6 +357,54 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return _run(config, None if args.all else {args.site}, run_dirs=True)
 
 
+def _cmd_batch(args: argparse.Namespace) -> int:
+    try:
+        scope, site, url, limit, mode = validate_selection(args.scope, args.site, args.url, args.max_urls, args.report_mode)
+        resolution = resolve_targets(inventory_path=Path(args.inventory), urls_text=os.environ.get("WP_MAINTENANCE_URLS"),
+                                     scope=scope, site_id=site, custom_url=url, max_urls=limit)
+    except TargetError as exc:
+        print(f"Target error: {exc}", file=sys.stderr)
+        return EXIT_CONFIGURATION
+    print(f"Targets from {resolution.source}: " + ", ".join(t.id for t in resolution.targets))
+    for note in resolution.notes:
+        print(f"Note: {note}")
+    if args.dry_run:
+        return EXIT_OK
+    run_id = args.run_id or os.environ.get("GITHUB_RUN_ID") or datetime.now(timezone.utc).strftime("local%Y%m%d%H%M%S")
+    history_dir = Path(args.history_dir) if args.history_dir else None
+    try:
+        results, cancelled = asyncio.run(run_targets(resolution.targets, site_concurrency=args.site_concurrency,
+                                                     site_timeout=args.site_timeout, log=lambda m: print(m, flush=True)))
+    except KeyboardInterrupt:
+        print("Cancelled before any site completed.", file=sys.stderr)
+        return EXIT_CANCELLED
+    outcome = write_batch(results, reports_dir=Path(args.output), history_dir=history_dir, run_id=run_id, scope=scope,
+                          source=resolution.source, report_mode=mode, notes=list(resolution.notes),
+                          retention_days=args.retention_days, cancelled=cancelled,
+                          save_history=scope != "custom_url")
+    print(f"Overall: {outcome.summary['overall_status']} | audited {outcome.summary['sites_audited']}/{outcome.summary['total_sites']}")
+    print(f"Reports: {outcome.run_dir.resolve()}")
+    print(f"Summary: {outcome.paths['summary_md'].resolve()}")
+    emit_github(outcome)
+    if args.notify:
+        repo = os.environ.get("GITHUB_REPOSITORY")
+        if not repo:
+            print("Notification skipped: GITHUB_REPOSITORY is not set.", file=sys.stderr)
+        else:
+            try:
+                server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+                run_url = f"{server}/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}" if os.environ.get("GITHUB_RUN_ID") else None
+                notifier = NOTIFIERS[args.notify](repo, allow_public=args.allow_public_issues, run_url=run_url)
+                for line in notifier.notify(outcome.summary, [r.model_dump(mode="json") for r in results], outcome.deltas):
+                    print(line)
+            except Exception as exc:  # notification problems never change audit evidence
+                print(f"Notification failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    code = batch_exit_code(outcome.summary, cancelled=cancelled)
+    if args.fail_on:
+        code = apply_fail_policy(code, outcome.summary, {p.strip() for p in args.fail_on.split(",") if p.strip()})
+    return code
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     try:
         if getattr(args, "output", None):
@@ -358,6 +496,8 @@ def main() -> None:
             code = _cmd_site(args)
         elif args.command == "audit":
             code = _cmd_audit(args)
+        elif args.command == "audit-batch":
+            code = _cmd_batch(args)
         elif args.command == "report":
             code = _cmd_report(args)
         elif args.command == "doctor":

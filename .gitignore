@@ -12,3 +12,5 @@ wp-maintenance.yaml
 wp-maintenance.yml
 *.backup.*
 *.log
+history-repo/
+history-state/

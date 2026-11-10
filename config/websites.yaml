@@ -1,0 +1,36 @@
+# WordPress Maintenance Agent - website inventory (canonical source of audit targets).
+#
+# Manage it with the CLI so validation (SSRF rules, duplicate detection) always runs:
+#   wp-maintenance site add https://example.com --name "Example"   # add (enabled)
+#   wp-maintenance site disable example                            # keep it listed, stop auditing
+#   wp-maintenance site enable example
+#   wp-maintenance site remove example                             # delete the entry
+#   wp-maintenance site validate
+#
+# Never put credentials in this file (the schema rejects them).
+# Only list websites you are authorised to monitor. This repository is public, so anything here is public:
+# use a private fork/copy for client sites you do not want to disclose.
+version: 1
+
+defaults:
+  audit_mode: public          # public evidence only; no WordPress credentials
+  max_urls: 500               # sitemap URLs checked per site
+  concurrency: 4              # parallel page checks per site (each host is also rate limited)
+  timeout_seconds: 20         # per-request timeout
+  respect_robots_txt: true    # skip sitemap URLs that robots.txt disallows
+
+sites:
+  - id: juhayna
+    name: Juhayna
+    url: https://www.juhayna.com
+    enabled: true
+    tags:
+      - wordpress
+      - corporate
+  # Disabled example showing the shape of an entry (example.invalid is reserved and never a real target):
+  # - id: business-example
+  #   name: Business Website
+  #   url: https://example-business.example
+  #   enabled: false
+  #   max_urls: 200
+  #   exclude_paths: ["/private/"]

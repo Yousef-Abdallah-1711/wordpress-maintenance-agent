@@ -24,6 +24,10 @@ Useful options: `--output <dir>`, `--max-pages <n>`, `--concurrency <n>`.
 - Weekly schedule: `wp-maintenance schedule install --weekly --day sunday --time 03:00` (add `--timezone <IANA zone>` if the machine is not on the desired time). Check with `schedule status`; remove with `schedule remove`. The scheduler runs without Codex or Claude Code open but only while the machine is on and the user is logged in (Windows Task Scheduler) or the host is up (cron/systemd).
 - Authenticated mode (optional, richer inventory): see the repository's `docs/AUTHENTICATION.md`. Never ask for secrets in chat or print them.
 
+## Hosted weekly monitoring (GitHub Actions)
+
+If the user wants audits that run without their computer, point them to `docs/GITHUB_ACTIONS.md`: sites live in `config/websites.yaml` (`wp-maintenance site add|enable|disable|remove|validate`), the *WordPress Maintenance Audit* workflow runs every Sunday 03:00 Africa/Cairo and on demand (`audit_scope` all/single/custom_url), and `wp-maintenance audit-batch` is the multi-site engine. Do not trigger workflows or change repository variables/secrets unless the user asks.
+
 ## Evidence and safety
 
 - The engine is audit-only. Do not modify WordPress files, database state, plugins, core, PHP, or production configuration.

@@ -18,3 +18,7 @@ Wordfence Intelligence V3 is an optional complete-feed integration and requires 
 - TLS inspection resolves the host, refuses non-public addresses and connects to that validated address with SNI. Trust is decided only by a **verifying** handshake. After a verification failure a separate diagnostic connection (certificate verification off) may read metadata for the report; that result is always labelled *not trusted*.
 - The crawler never bypasses WAFs, CAPTCHAs or rate limits: sustained 403/429 responses stop the crawl and the audit is `INCOMPLETE`. Audit runtime is capped (`audit.max_crawl_seconds`).
 - Optional probes (`/wp-json/`, `/feed/`, `robots.txt`, www/apex check) are single GET requests; no exploitation, enumeration, brute force or authentication attempts are made.
+
+## GitHub Actions hardening (v0.3)
+
+Workflow token permissions are empty by default and granted per job (`contents: read`, `actions: read`, `issues: write` only for the optional issue notifier). Actions are pinned to commit SHAs, there is no `pull_request_target`, workflow inputs travel only through environment variables and are validated twice, summaries and annotations escape untrusted text, secrets are scoped to individual steps, and history uses a repository-scoped deploy key rather than a personal token. Reports are not uploaded from public repositories unless `WP_MAINTENANCE_PUBLIC_ARTIFACTS=true`. The inventory rejects credentials and unsafe targets.

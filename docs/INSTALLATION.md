@@ -13,3 +13,7 @@ The PowerShell and shell helpers in `scripts/` wrap these commands; they do not 
 1. `wp-maintenance doctor` reports the CLI path, global guidance and whether each skill is `installed and current`. Re-running `wp-maintenance install --global` updates an outdated managed block or skill in place (file backups sit next to them; skill backups go to `~/.wp-maintenance/backups/` so they are never registered as a duplicate skill).
 2. Make sure Python's `Scripts` directory is on `PATH` (pip prints a warning if it is not), then open a **new** terminal in any directory and run `wp-maintenance --version`.
 3. Start a new Codex or Claude Code session and say `Audit https://www.example.com`. `doctor` verifies *installation*; whether the agent chooses to invoke the skill is the agent's behaviour and can only be confirmed by trying it.
+
+## Hosted setup (v0.3)
+
+Users who only want scheduled audits can skip local installation: fork the repository and follow [GITHUB_ACTIONS.md](GITHUB_ACTIONS.md). `pip install .` is needed only to manage `config/websites.yaml` locally (`ruamel.yaml` is a new dependency for comment-preserving edits).

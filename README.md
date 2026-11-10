@@ -20,6 +20,10 @@ wp-maintenance site add https://shop.example.org
 wp-maintenance schedule install --weekly --day sunday --time 03:00
 ```
 
+## GitHub Actions: hosted weekly monitoring (v0.3)
+
+Fork the repository, list your sites in [`config/websites.yaml`](config/websites.yaml) (`wp-maintenance site add <url>`), run **Actions -> WordPress Maintenance Audit -> Run workflow**, then set the repository variable `WP_MAINTENANCE_SCHEDULE_ENABLED=true`. Every Sunday at 03:00 Africa/Cairo the workflow audits all enabled sites without your computer being online, writes per-site Markdown/JSON reports plus a weekly summary and delta, compares with the previous run, and publishes a job summary. Run a single site or a one-off URL from the same *Run workflow* form. Private history storage, retention, optional GitHub Issues, security and troubleshooting are in [docs/GITHUB_ACTIONS.md](docs/GITHUB_ACTIONS.md).
+
 ## What it does
 
 - Audits multiple configured WordPress sites.
@@ -102,7 +106,7 @@ Only agent-owned guidance blocks and skill directories marked by the installer a
 
 ## Security and limitations
 
-See [CLI reference](docs/CLI.md), [Security](SECURITY.md), [Installation](docs/INSTALLATION.md), [Configuration](docs/CONFIGURATION.md), [Authentication](docs/AUTHENTICATION.md), [Automation](docs/AUTOMATION.md), and [Report format](docs/REPORT_FORMAT.md). Each socket connection pins a validated public DNS address while preserving the hostname for TLS. Keep network egress controls enabled as a defense in depth.
+See [GitHub Actions guide](docs/GITHUB_ACTIONS.md), [CLI reference](docs/CLI.md), [Security](SECURITY.md), [Installation](docs/INSTALLATION.md), [Configuration](docs/CONFIGURATION.md), [Authentication](docs/AUTHENTICATION.md), [Automation](docs/AUTOMATION.md), and [Report format](docs/REPORT_FORMAT.md). Each socket connection pins a validated public DNS address while preserving the hostname for TLS. Keep network egress controls enabled as a defense in depth.
 
 ## Development
 

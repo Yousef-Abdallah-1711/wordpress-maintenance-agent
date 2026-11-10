@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
-import httpx
 from packaging.version import InvalidVersion, Version
 
 from .core_audit import audit_core
@@ -181,8 +180,12 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
                 result.http["security_headers"] = present
                 result.findings.extend(header_findings)
                 result.coverage.append("security_headers")
-        if opts.seo:
+        robots_text: str | None = None
+        if opts.seo or opts.respect_robots_txt:
             robots = await _probe(client.get(f"{origin}/robots.txt"), result, "robots.txt")
+            if robots is not None and robots.status_code == 200:
+                robots_text = robots.body.decode("utf-8", "replace")
+        if opts.seo:
             if home_ok:
                 seo_info, seo_findings = analyze_seo(robots=robots, canonical=parser.canonical,
                     meta_robots=parser.meta_robots,
@@ -452,6 +455,16 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
                 excluded = [path for path in site.exclude_paths if path]
                 allowed_urls = [url for url in sitemaps.urls
                                 if not any(urlsplit(url).path.startswith(path) for path in excluded)]
+                robots_skipped = 0
+                if opts.respect_robots_txt and robots_text:
+                    from urllib.robotparser import RobotFileParser
+                    parser_rules = RobotFileParser()
+                    parser_rules.parse(robots_text.splitlines())
+                    permitted = [u for u in allowed_urls if parser_rules.can_fetch("WordPressMaintenanceAgent", u)]
+                    robots_skipped = len(allowed_urls) - len(permitted)
+                    allowed_urls = permitted
+                    if robots_skipped:
+                        result.limitations.append(f"{robots_skipped} sitemap URLs were not checked because robots.txt disallows them (respect_robots_txt).")
                 crawl_stats: dict[str, object] = {}
                 page_results = await check_pages(allowed_urls, client, concurrency=opts.concurrency,
                                                  excluded_paths=tuple(excluded),
@@ -459,7 +472,7 @@ async def audit_site(site: Site, config: AppConfig) -> AuditResult:
                 result.pages = page_results
                 listed = max(sitemaps.listed_total, len(allowed_urls))
                 result.crawl = {"urls_checked": len(page_results), "urls_in_scope": len(allowed_urls),
-                    "sitemap_urls_listed": listed, "sitemap_truncated": sitemaps.truncated,
+                    "sitemap_urls_listed": listed, "sitemap_truncated": sitemaps.truncated, "robots_skipped": robots_skipped,
                     "halted_reason": crawl_stats.get("halted_reason")}
                 suffix = "+" if sitemaps.truncated else ""
                 if len(page_results) < listed or sitemaps.truncated:

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 - 2026-11-10
+
+- GitHub Actions is now the primary automation platform: `WordPress Maintenance Audit` workflow with a native `Africa/Cairo` Sunday 03:00 schedule, manual inputs (`audit_scope` all/single/custom_url, `site_id`, `custom_url`, `max_urls`, `report_mode`), job summary, annotations, fail policy, pinned actions and least-privilege permissions.
+- Persistent website inventory `config/websites.yaml` with strict schema, duplicate/SSRF/credential rejection, comment-preserving atomic edits; `site add|remove|enable|disable|show|validate`; `WP_MAINTENANCE_URLS` compatibility with documented precedence.
+- `audit-batch`: bounded multi-site execution with per-site isolation, timeouts, cancellation; `summary.md|json`, `weekly-delta.md`, per-site reports.
+- Persistent history (private history repository via deploy key, or artifact backend), retention, evidence-aware week-over-week comparison (resolved only when re-verified).
+- Optional GitHub Issues notifier for critical findings and an extensible notifier interface; robots.txt-respecting crawl (`respect_robots_txt`).
+- Replaces the 0.2 workflow and its `WP_MAINTENANCE_CONFIG_B64` secret flow.
+
 ## 0.2.0 — 2026-11-10
 
 - Zero-config `wp-maintenance audit <url>` / `--url`; URL normalization with SSRF validation; `site add <url>`, `site remove`, `schedule install --weekly --day --time --timezone`, `schedule remove`.

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import platform
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator

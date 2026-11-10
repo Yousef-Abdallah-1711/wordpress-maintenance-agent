@@ -64,6 +64,7 @@ class AuditOptions(BaseModel):
     retries: int = Field(default=2, ge=0, le=5)
     max_response_bytes: int = Field(default=2_000_000, ge=1024, le=20_000_000)
     ssl: bool = True
+    respect_robots_txt: bool = True
     security_headers: bool = True
     seo: bool = True
     ssl_warning_days: int = Field(default=30, ge=1, le=365)

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
 
 from .http import SafeHttp
 

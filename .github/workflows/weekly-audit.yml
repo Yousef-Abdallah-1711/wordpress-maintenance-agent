@@ -1,58 +1,158 @@
-name: Weekly WordPress maintenance audit
+name: WordPress Maintenance Audit
+run-name: "WordPress Maintenance Audit (${{ github.event_name }}${{ inputs.audit_scope && format(' - {0}', inputs.audit_scope) || '' }})"
 
+# Weekly (Sunday 03:00 Africa/Cairo) and on-demand, read-only audits of the sites in config/websites.yaml
+# (or the WP_MAINTENANCE_URLS repository variable). See docs/GITHUB_ACTIONS.md.
 on:
   schedule:
-    - cron: "0 0 * * 0"
+    # GitHub supports IANA time zones for schedules, so Egypt's daylight saving time is handled for us.
+    # Scheduled runs may start several minutes late. The schedule only runs when the repository variable
+    # WP_MAINTENANCE_SCHEDULE_ENABLED is set to "true" (see the job condition below).
+    - cron: "0 3 * * 0"
+      timezone: "Africa/Cairo"
   workflow_dispatch:
+    inputs:
+      audit_scope:
+        description: "What to audit: all enabled sites, a single inventory site, or one temporary URL"
+        type: choice
+        default: all
+        options: [all, single, custom_url]
+      site_id:
+        description: "Inventory site id (audit_scope = single)"
+        type: string
+        required: false
+      custom_url:
+        description: "One-time URL, not saved to the inventory (audit_scope = custom_url)"
+        type: string
+        required: false
+      max_urls:
+        description: "Optional limit on sitemap URLs checked per site (1-50000)"
+        type: string
+        required: false
+      report_mode:
+        description: "standard or detailed (detailed lists every checked URL)"
+        type: choice
+        default: standard
+        options: [standard, detailed]
 
-permissions:
-  contents: read
+# No default token permissions; the job requests exactly what it needs.
+permissions: {}
 
 concurrency:
-  group: wordpress-maintenance-weekly-audit
+  group: wordpress-maintenance-audit
   cancel-in-progress: false
 
 jobs:
   audit:
+    name: Audit websites
+    if: github.event_name != 'schedule' || vars.WP_MAINTENANCE_SCHEDULE_ENABLED == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: read   # checkout
+      actions: read    # download the previous history artifact (artifact history backend)
+      issues: write    # only used when WP_MAINTENANCE_ISSUES=true
+    env:
+      # User-controlled workflow inputs are passed ONLY through environment variables and are never
+      # interpolated into shell source. wp-maintenance validates every value again.
+      INPUT_SCOPE: ${{ inputs.audit_scope || 'all' }}
+      INPUT_SITE_ID: ${{ inputs.site_id }}
+      INPUT_CUSTOM_URL: ${{ inputs.custom_url }}
+      INPUT_MAX_URLS: ${{ inputs.max_urls }}
+      INPUT_REPORT_MODE: ${{ inputs.report_mode || 'standard' }}
+      WP_MAINTENANCE_URLS: ${{ vars.WP_MAINTENANCE_URLS }}
+      RETENTION_DAYS: ${{ vars.WP_MAINTENANCE_RETENTION_DAYS || '365' }}
+      FAIL_ON: ${{ vars.WP_MAINTENANCE_FAIL_ON || 'critical,incomplete' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
           cache: pip
-      - run: python -m pip install .
-      - name: Load private configuration
-        id: config
-        env:
-          CONFIG_B64: ${{ secrets.WP_MAINTENANCE_CONFIG_B64 }}
-          WP_MAINTENANCE_URLS: ${{ vars.WP_MAINTENANCE_URLS }}
-          WP_MAINTENANCE_REPORTS_DIR: ${{ github.workspace }}/reports
+
+      - name: Install wp-maintenance
+        run: python -m pip install .
+
+      - name: Validate inventory and resolve targets
         run: |
-          if [ -n "$CONFIG_B64" ]; then
-            python -c 'import base64,os,pathlib; pathlib.Path("wp-maintenance.yaml").write_bytes(base64.b64decode(os.environ["CONFIG_B64"]))'
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          elif [ -n "$WP_MAINTENANCE_URLS" ]; then
-            for url in $WP_MAINTENANCE_URLS; do wp-maintenance site add "$url" --config wp-maintenance.yaml; done
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          elif [ -f wp-maintenance.yaml ]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "No site configuration found. Set WP_MAINTENANCE_CONFIG_B64 to enable scheduled audits."
+          set -euo pipefail
+          if [ -f config/websites.yaml ]; then
+            wp-maintenance site validate --inventory config/websites.yaml
           fi
-      - name: Run audits
-        if: steps.config.outputs.configured == 'true'
+          # The dry run applies exactly the same selection, precedence and input validation as the real run.
+          args=(--scope "$INPUT_SCOPE" --report-mode "$INPUT_REPORT_MODE" --dry-run)
+          if [ -n "$INPUT_SITE_ID" ]; then args+=(--site "$INPUT_SITE_ID"); fi
+          if [ -n "$INPUT_CUSTOM_URL" ]; then args+=(--url "$INPUT_CUSTOM_URL"); fi
+          if [ -n "$INPUT_MAX_URLS" ]; then args+=(--max-urls "$INPUT_MAX_URLS"); fi
+          wp-maintenance audit-batch "${args[@]}"
+
+      - name: Decide report storage policy
+        id: policy
         env:
-          WP_MAINTENANCE_REPORTS_DIR: ${{ github.workspace }}/reports
-          WORDFENCE_API_KEY: ${{ secrets.WORDFENCE_API_KEY }}
-          WORDPRESS_PRODUCTION: ${{ secrets.WORDPRESS_PRODUCTION }}
-          WORDPRESS_STAGING: ${{ secrets.WORDPRESS_STAGING }}
-        run: wp-maintenance audit --all --config wp-maintenance.yaml
-      - uses: actions/upload-artifact@v7
-        if: always() && steps.config.outputs.configured == 'true'
+          GH_TOKEN: ${{ github.token }}
+          HISTORY_REPO: ${{ vars.WP_MAINTENANCE_HISTORY_REPO }}
+          HISTORY_KEY_SET: ${{ secrets.WP_MAINTENANCE_HISTORY_DEPLOY_KEY != '' }}
+          PUBLIC_ARTIFACTS: ${{ vars.WP_MAINTENANCE_PUBLIC_ARTIFACTS }}
+        run: bash scripts/ci/policy.sh
+
+      - name: Load audit history (private repository)
+        if: steps.policy.outputs.history_backend == 'repo'
+        env:
+          HISTORY_REPO: ${{ vars.WP_MAINTENANCE_HISTORY_REPO }}
+          HISTORY_KEY: ${{ secrets.WP_MAINTENANCE_HISTORY_DEPLOY_KEY }}
+        run: bash scripts/ci/history-repo-load.sh
+
+      - name: Load audit history (previous artifact)
+        if: steps.policy.outputs.history_backend == 'artifact'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/history-artifact-load.sh
+
+      - name: Run audits
+        id: audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTIFY_ISSUES: ${{ vars.WP_MAINTENANCE_ISSUES }}
+          ISSUES_ALLOW_PUBLIC: ${{ vars.WP_MAINTENANCE_ISSUES_ALLOW_PUBLIC }}
+          HISTORY_DIR: ${{ steps.policy.outputs.history_dir }}
+        run: bash scripts/ci/run-audit.sh
+
+      - name: Save audit history (private repository)
+        if: always() && steps.policy.outputs.history_backend == 'repo' && steps.audit.outcome != 'skipped'
+        env:
+          HISTORY_REPO: ${{ vars.WP_MAINTENANCE_HISTORY_REPO }}
+          HISTORY_KEY: ${{ secrets.WP_MAINTENANCE_HISTORY_DEPLOY_KEY }}
+          REPORT_DIR: ${{ steps.audit.outputs.report_dir }}
+        run: bash scripts/ci/history-repo-save.sh
+
+      - name: Upload reports
+        if: always() && steps.policy.outputs.upload_artifacts == 'true' && steps.audit.outputs.report_dir != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: wordpress-maintenance-report-${{ github.run_id }}
-          path: reports/
+          name: wp-maintenance-reports-${{ github.run_id }}
+          path: ${{ steps.audit.outputs.report_dir }}
+          retention-days: ${{ vars.WP_MAINTENANCE_ARTIFACT_RETENTION_DAYS || 30 }}
           if-no-files-found: warn
-          retention-days: 30
+
+      - name: Upload history state (artifact backend)
+        if: always() && steps.policy.outputs.history_backend == 'artifact' && steps.audit.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wp-maintenance-history
+          path: history-state
+          retention-days: ${{ vars.WP_MAINTENANCE_HISTORY_RETENTION_DAYS || 90 }}
+          overwrite: true
+          if-no-files-found: ignore
+
+      - name: Enforce audit result
+        if: always() && steps.audit.outputs.exit_code != '' && steps.audit.outputs.exit_code != '0'
+        env:
+          AUDIT_EXIT_CODE: ${{ steps.audit.outputs.exit_code }}
+        run: |
+          echo "::error title=Maintenance audit needs attention::wp-maintenance exited with code ${AUDIT_EXIT_CODE} (policy: fail on ${FAIL_ON}). See the job summary."
+          exit 1
