@@ -16,8 +16,8 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -43,7 +43,7 @@ jobs:
           WORDPRESS_PRODUCTION: ${{ secrets.WORDPRESS_PRODUCTION }}
           WORDPRESS_STAGING: ${{ secrets.WORDPRESS_STAGING }}
         run: wp-maintenance audit --all --config wp-maintenance.yaml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && steps.config.outputs.configured == 'true'
         with:
           name: wordpress-maintenance-report-${{ github.run_id }}
